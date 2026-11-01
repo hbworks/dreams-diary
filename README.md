@@ -13,7 +13,7 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 | :--- | :--- |
 | `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git/*`, and memory rows added that day. Also saved to `dreams/_material/<date>.md`. |
 | `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`. |
-| `dreams_validate` | Checks the six sections, rejects the second person (`あなた`), reports char count, and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
+| `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports char count, and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
 | `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
 
 ## Data layout — one diary per agent
@@ -87,6 +87,9 @@ to copy verbatim. Keep the one-cron-per-profile convention unless you intentiona
 
 ## Validator rules
 
+- `missing_frontmatter` / `missing_frontmatter_field` (error) — requires a delimited frontmatter block with `date`, `author`, `sessions`, `messages`, and `commit`.
+- `invalid_frontmatter_date` / `frontmatter_date_mismatch` (error) — `date` must be a real `YYYY-MM-DD` date matching the diary filename.
+- `invalid_frontmatter_field` (error) — `author` must be non-empty, `sessions` and `messages` must be non-negative integers, and `commit` must contain a value or a list.
 - `missing_section` (error) — one of the six headings is absent.
 - `second_person` (error) — `あなた` appears. Refer to the human as `ユーザー`, quote or report
   what they said (`「〜と言っていた」`), never assert their inner state.
@@ -106,7 +109,7 @@ game error codes — is ignored unless the surrounding line is about a commit.
 python3 -m unittest discover -s tests
 ```
 
-18 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
+22 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
 throwaway git repo, so nothing touches real data.
 
 ---
@@ -133,6 +136,9 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 `dreams_material` は呼びません。Cron worker の tool home が root home に解決される場合があるため、
 `dreams_validate` には必ず生成したファイルの `path` を渡します。
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。
+検証には `date` / `author` / `sessions` / `messages` / `commit` を含む frontmatter が必要で、
+`date` はファイル名の日付と一致しなければなりません。これで素材パックを日記と誤認する
+ケースを検出します。
 
 検査でいちばん効くのは **コミットハッシュの実在確認**。日付と時刻は正しいのに桁だけ
 作られたハッシュが混入する事故が実際に起きたため、`~/Dev/git` 配下の全リポジトリを横断して

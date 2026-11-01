@@ -150,17 +150,50 @@ class ValidateTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return path
 
-    def _good_body(self) -> str:
+    def _section_body(self) -> str:
         return (
             f"# {DAY}\n\n"
             + "\n\n".join(f"{s}\n本文。（{self.sha}）" for s in core.SECTIONS)
             + "\n"
         )
 
+    def _good_body(self) -> str:
+        return (
+            f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
+            + self._section_body()
+        )
+
     def test_valid_entry_passes(self):
         self._write(self._good_body())
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertTrue(res["ok"], res)
+
+    def test_missing_frontmatter_fails(self):
+        self._write(self._section_body())
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("missing_frontmatter", res["errors"])
+
+    def test_missing_frontmatter_field_fails(self):
+        body = self._good_body().replace("messages: 1\n", "")
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("missing_frontmatter_field", res["errors"])
+
+    def test_frontmatter_date_must_match_filename(self):
+        body = self._good_body().replace(f"date: {DAY}", "date: 2026-10-04")
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("frontmatter_date_mismatch", res["errors"])
+
+    def test_frontmatter_counts_must_be_integers(self):
+        body = self._good_body().replace("messages: 1\n", "messages: many\n")
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("invalid_frontmatter_field", res["errors"])
 
     def test_missing_section_fails(self):
         body = self._good_body().replace(core.SECTIONS[-1], "")

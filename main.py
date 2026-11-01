@@ -393,6 +393,96 @@ def validate_diary(
     text = target.read_text(encoding="utf-8")
 
     issues: List[Dict[str, str]] = []
+    lines = text.splitlines()
+    frontmatter_end = next(
+        (i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    has_frontmatter = (
+        bool(lines)
+        and lines[0].strip() == "---"
+        and frontmatter_end is not None
+    )
+    if not has_frontmatter:
+        issues.append(
+            {
+                "level": "error",
+                "code": "missing_frontmatter",
+                "detail": "日付などのメタデータを含む YAML frontmatter が必要。",
+            }
+        )
+    else:
+        frontmatter_fields = {}
+        frontmatter_lines = lines[1:frontmatter_end]
+        for line in frontmatter_lines:
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$", line)
+            if match:
+                frontmatter_fields[match.group(1)] = (match.group(2) or "").strip()
+        required_fields = ("date", "author", "sessions", "messages", "commit")
+        missing_fields = [key for key in required_fields if key not in frontmatter_fields]
+        if missing_fields:
+            issues.append(
+                {
+                    "level": "error",
+                    "code": "missing_frontmatter_field",
+                    "detail": "必須フィールドがない: " + ", ".join(missing_fields),
+                }
+            )
+        else:
+            def scalar(key: str) -> str:
+                value = frontmatter_fields[key].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1].strip()
+                return value
+
+            frontmatter_date = scalar("date")
+            try:
+                frontmatter_date = _valid_date(frontmatter_date)
+            except ValueError:
+                issues.append(
+                    {
+                        "level": "error",
+                        "code": "invalid_frontmatter_date",
+                        "detail": f"frontmatter の date が YYYY-MM-DD ではない: {frontmatter_date!r}",
+                    }
+                )
+            else:
+                filename_date = re.fullmatch(
+                    r"(\d{4}-\d{2}-\d{2})(?:-\d)?", target.stem
+                )
+                if filename_date and frontmatter_date != filename_date.group(1):
+                    issues.append(
+                        {
+                            "level": "error",
+                            "code": "frontmatter_date_mismatch",
+                            "detail": f"frontmatter の date {frontmatter_date} がファイル名の日付 {filename_date.group(1)} と一致しない。",
+                        }
+                    )
+
+            invalid_fields = [
+                key
+                for key in ("author", "sessions", "messages")
+                if not scalar(key)
+            ]
+            invalid_fields.extend(
+                key
+                for key in ("sessions", "messages")
+                if scalar(key) and not re.fullmatch(r"\d+", scalar(key))
+            )
+            has_commit_list = any(
+                re.match(r"^\s+-\s+\S", line) for line in frontmatter_lines
+            )
+            if not scalar("commit") and not has_commit_list:
+                invalid_fields.append("commit")
+            if invalid_fields:
+                issues.append(
+                    {
+                        "level": "error",
+                        "code": "invalid_frontmatter_field",
+                        "detail": "値が空または形式不正: " + ", ".join(sorted(set(invalid_fields)),),
+                    }
+                )
+
     missing = [s for s in SECTIONS if s not in text]
     for s in missing:
         issues.append({"level": "error", "code": "missing_section", "detail": s})
