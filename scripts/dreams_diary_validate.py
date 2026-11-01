@@ -1,43 +1,19 @@
-"""Profile-local cron bridge to the shared Dreams Diary validation CLI.
+"""Profile-local cron bridge for validation — a shim over the material bridge.
 
-Hermes cron only runs scripts resolved inside the active profile's scripts/ directory.
-This bridge keeps the plugin CLI as the source of truth without copying its implementation.
+Hermes cron only runs scripts resolved inside the active profile's scripts/ directory,
+and both bridges are copied side by side. ``run()`` lives in ``dreams_diary_material.py``
+so the two entry points cannot drift apart.
 """
 
 from __future__ import annotations
 
-import os
-import runpy
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-def _plugin_cli() -> Path:
-    hermes_root = Path.home() / ".hermes"
-    candidates: list[Path] = []
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    if hermes_home:
-        candidates.append(Path(hermes_home).expanduser() / "plugins" / "dreams-diary" / "cli.py")
-    profile = os.environ.get("HERMES_PROFILE", "").strip()
-    if profile:
-        candidates.append(
-            hermes_root / "profiles" / profile / "plugins" / "dreams-diary" / "cli.py"
-        )
-    candidates.append(hermes_root / "plugins" / "dreams-diary" / "cli.py")
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise SystemExit(
-        "Dreams Diary CLI not found in the active profile or ~/.hermes/plugins; "
-        "install the dreams-diary plugin before running this cron bridge."
-    )
-
-
-def main() -> None:
-    cli = _plugin_cli()
-    sys.argv = [str(cli), "validate"]
-    runpy.run_path(str(cli), run_name="__main__")
+from dreams_diary_material import run  # noqa: E402
 
 
 if __name__ == "__main__":
-    main()
+    run("validate")

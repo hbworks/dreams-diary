@@ -227,15 +227,19 @@ REPO_SCAN_MAX_DEPTH = 3
 REPO_SCAN_SKIP = {"node_modules", "venv", "__pycache__", "site-packages", "build", "dist"}
 
 
-def discover_repos(base: Optional[str] = None, max_depth: int = REPO_SCAN_MAX_DEPTH) -> List[Path]:
+def discover_repos(base: Optional[str] = None, max_depth: Optional[int] = None) -> List[Path]:
     """ハッシュ検証に使うリポジトリ一覧。環境変数 DREAMS_REPOS で上書き可。
 
     1階層だけを見ると `~/Dev/git/<group>/<repo>` のような入れ子のリポジトリが
-    「存在しない」ことになり、実在するコミットを捏造と誤判定する。深さ3まで辿る。
+    「存在しない」ことになり、実在するコミットを捏造と誤判定する。深さ3まで辿る
+    （DREAMS_REPO_DEPTH で変更可）。
     """
     env = os.environ.get("DREAMS_REPOS", "").strip()
     if env:
         return [Path(os.path.expanduser(p)) for p in env.split(":") if p.strip()]
+    if max_depth is None:
+        depth_env = os.environ.get("DREAMS_REPO_DEPTH", "").strip()
+        max_depth = int(depth_env) if depth_env.isdigit() else REPO_SCAN_MAX_DEPTH
     root = Path(os.path.expanduser(base or "~/Dev/git"))
     if not root.is_dir():
         return []
@@ -269,7 +273,7 @@ def _commits_material(day: str, repos: Optional[List[Path]] = None) -> str:
                     str(repo),
                     "log",
                     f"--since={day} 00:00",
-                    f"--until={day} 23:59",
+                    f"--until={day} 23:59:59",
                     "--pretty=format:%h %ad %s",
                     "--date=format:%H:%M",
                     "--stat",
@@ -286,6 +290,40 @@ def _commits_material(day: str, repos: Optional[List[Path]] = None) -> str:
     return ("\n\n".join(blocks) + "\n") if blocks else f"（{day} のコミットは無い）\n"
 
 
+def _previous_diary(day: str, home: Path) -> Optional[Path]:
+    """指定日より前の、いちばん新しい日記。"""
+    ddir = home / "dreams"
+    if not ddir.is_dir():
+        return None
+    candidates = [
+        f
+        for f in ddir.iterdir()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-\d)?\.md", f.name) and f.stem[:10] < day
+    ]
+    return max(candidates, key=lambda f: f.stem) if candidates else None
+
+
+def _gate_material(day: str, home: Path, repos: Optional[List[Path]] = None) -> str:
+    """前回の日記を検査する（cron の post-run フックが無い代わりの遅延ゲート）。"""
+    try:
+        previous = _previous_diary(day, home)
+    except OSError as exc:
+        return f"（前回の日記を探せなかった: {exc}）\n"
+    if previous is None:
+        return "（前回の日記は無い。初回なら問題なし）\n"
+    try:
+        result = validate_diary(path=str(previous), home=home, repos=repos)
+    except Exception as exc:  # noqa: BLE001 - 素材生成を巻き込まない
+        return f"（{previous.name} を検査できなかった: {type(exc).__name__}: {exc}）\n"
+    if result["ok"]:
+        return f"- {previous.name}: ok\n"
+    lines = [f"- {previous.name}: **未通過（要修正）**"]
+    for issue in result["issues"]:
+        lines.append(f"  - [{issue['level']}] {issue['code']}: {issue['detail'][:200]}")
+    lines.append(f"  - 対象ファイル: {previous}")
+    return "\n".join(lines) + "\n"
+
+
 def collect_material(
     day: Optional[str] = None,
     home: Optional[Path] = None,
@@ -300,6 +338,8 @@ def collect_material(
         f"# 夢日記の素材 — {day}\n\n"
         f"生成: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')} / プロファイル: {home.name}\n"
         f"日記ファイル: {diary} （{'あり（上書き禁止）' if diary.exists() else 'なし'}）\n\n"
+        # post-run ゲートの代わり: 前回の日記を検査し、未通過なら先頭で知らせる。
+        f"## 前回の日記の検証\n{_gate_material(day, home, repos)}\n"
     )
     conversation = _sessions_material(day, home)
     commits = _commits_material(day, repos)
@@ -380,6 +420,14 @@ def collect_material(
 # ------------------------------------------------------------------- writing
 
 
+def _author_name(home: Path) -> str:
+    """root home では `.hermes` のような名前になるので、プロファイル名へ逃がす。"""
+    name = home.name.strip()
+    if name.startswith(".") or not name:
+        return os.environ.get("HERMES_PROFILE", "").strip() or "agent"
+    return name
+
+
 def write_skeleton(
     day: Optional[str] = None,
     home: Optional[Path] = None,
@@ -421,7 +469,7 @@ def write_skeleton(
             "reason": "exists",
             "message": f"{path} は既にある。上書きするなら force=true、別名にするなら日記を手で書く。",
         }
-    author = author or home.name
+    author = author or _author_name(home)
     text = (
         "---\n"
         f'date: {day}\n'
@@ -653,6 +701,44 @@ def validate_diary(
         "repos_checked": [r.name for r in repos],
         "errors": sorted({i["code"] for i in errors}),
         "issues": issues,
+    }
+
+
+def audit_diaries(
+    home: Optional[Path] = None,
+    days: int = 7,
+    repos: Optional[List[Path]] = None,
+) -> Dict[str, Any]:
+    """直近の日記をまとめて検査する（cron の post-run ゲートが無い環境向け）。"""
+    home = home or resolve_profile_home()
+    ddir = home / "dreams"
+    limit = max(1, int(days))
+    results: List[Dict[str, Any]] = []
+    if ddir.is_dir():
+        files = sorted(
+            (f for f in ddir.iterdir() if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-\d)?\.md", f.name)),
+            reverse=True,
+        )[:limit]
+        repos = repos if repos is not None else discover_repos()
+        for f in files:
+            checked = validate_diary(path=str(f), home=home, repos=repos)
+            results.append(
+                {
+                    "file": f.name,
+                    "path": str(f),
+                    "ok": checked["ok"],
+                    "chars": checked.get("chars", 0),
+                    "errors": checked["errors"],
+                    "issues": checked["issues"],
+                }
+            )
+    failed = [r["file"] for r in results if not r["ok"]]
+    return {
+        "ok": not failed,
+        "home": str(home),
+        "checked": len(results),
+        "failed": failed,
+        "results": results,
     }
 
 

@@ -90,6 +90,20 @@ $ env -u HERMES_HOME python3 cli.py material 2026-11-01
 `dreams_index` / `cli.py index` never fails on a single bad file: unreadable diaries are skipped,
 reported in `skipped`, and listed in `INDEX.md` under 読めなかった日記 so the gap stays visible.
 
+### Late gate (cron has no post-run hook)
+
+The cron `script` runs *before* the agent, so validation happens inside the same agent run. As a
+backstop, every material pack starts with `## 前回の日記の検証`: the most recent earlier diary is
+validated and a failure is printed with its codes and absolute path, which the cron prompt tells
+the agent to fix before writing today's entry. `cli.py audit [--days N]` does the same across the
+last N diaries for manual or pipeline use and exits non-zero when any fails.
+
+## Versioning
+
+The third digit is for fixes: bug fixes, behaviour corrections, and small hardening bumps
+(`1.3.0` → `1.3.1`). Reserve the second digit for new capability, so a stream of repairs does not
+inflate the version. `plugin.yaml` is the source of truth and `git tag v<version>` marks releases.
+
 ## The six sections
 
 1. 今日、何を見ていたか — factual, with times

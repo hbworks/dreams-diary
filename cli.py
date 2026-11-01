@@ -4,6 +4,7 @@
     python3 cli.py [--profile NAME] material [YYYY-MM-DD]   # 素材を stdout に出す
     python3 cli.py [--profile NAME] write    [YYYY-MM-DD]   # 節見出しだけの日記を作る
     python3 cli.py [--profile NAME] validate [YYYY-MM-DD]   # 検査（JSON）
+    python3 cli.py [--profile NAME] audit   [--days N]      # 直近 N 本をまとめて検査
     python3 cli.py [--profile NAME] index                   # INDEX.md 再生成
 
 プロファイルを特定できない文脈（HERMES_HOME もコンテキストローカル home も無い）では
@@ -24,9 +25,10 @@ import main as core  # noqa: E402
 UNRELIABLE_SOURCES = {"active_profile", "root"}
 
 
-def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str]]:
-    """(--profile, command, date) を取り出す。--profile は前後どちらでもよい。"""
+def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str], int]:
+    """(--profile, command, date, days) を取り出す。フラグは前後どちらでもよい。"""
     profile: Optional[str] = None
+    days = 7
     rest: List[str] = []
     args = list(argv)
     while args:
@@ -39,10 +41,21 @@ def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str]]:
         if item.startswith("--profile="):
             profile = item.split("=", 1)[1]
             continue
+        if item == "--days":
+            if not args or not args[0].isdigit():
+                raise ValueError("--days には正の整数が必要です")
+            days = int(args.pop(0))
+            continue
+        if item.startswith("--days="):
+            value = item.split("=", 1)[1]
+            if not value.isdigit():
+                raise ValueError("--days には正の整数が必要です")
+            days = int(value)
+            continue
         rest.append(item)
     cmd = rest[0] if rest else "material"
     day = rest[1] if len(rest) > 1 else None
-    return profile, cmd, day
+    return profile, cmd, day, days
 
 
 def _warn_unscoped(home: Path, source: str) -> None:
@@ -56,7 +69,7 @@ def _warn_unscoped(home: Path, source: str) -> None:
 
 def main(argv: List[str]) -> int:
     try:
-        profile, cmd, day = _parse(argv)
+        profile, cmd, day, days = _parse(argv)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -70,6 +83,10 @@ def main(argv: List[str]) -> int:
             print(core.json_dumps(core.write_skeleton(day, home=home)))
         elif cmd == "validate":
             res = core.validate_diary(day, home=home)
+            print(core.json_dumps(res))
+            return 0 if res.get("ok") else 1
+        elif cmd == "audit":
+            res = core.audit_diaries(home=home, days=days)
             print(core.json_dumps(res))
             return 0 if res.get("ok") else 1
         elif cmd == "index":

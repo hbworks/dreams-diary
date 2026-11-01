@@ -131,6 +131,55 @@ class MaterialTests(unittest.TestCase):
         self.assertIn("テスト用の記憶", material)
 
 
+    def test_material_reports_previous_diary_ok(self):
+        # post-run フックが無い代わりに、翌日の素材で前回分の検証結果を知らせる
+        prev = self.home / "dreams" / "2026-10-04.md"
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        prev.write_text(
+            "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+            "commit: none\n---\n\n# 2026-10-04\n\n"
+            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + "\n",
+            encoding="utf-8",
+        )
+        material = core.collect_material(DAY, home=self.home, repos=[self.repo])["material"]
+        self.assertIn("前回の日記の検証", material)
+        self.assertIn("- 2026-10-04.md: ok", material)
+
+    def test_material_reports_previous_diary_failure(self):
+        prev = self.home / "dreams" / "2026-10-04.md"
+        prev.parent.mkdir(parents=True, exist_ok=True)
+        prev.write_text("---\ndate: 2026-10-04\n---\n\n# 2026-10-04\n\n本文だけ。\n", encoding="utf-8")
+        material = core.collect_material(DAY, home=self.home, repos=[self.repo])["material"]
+        self.assertIn("2026-10-04.md", material)
+        self.assertIn("未通過", material)
+        self.assertIn("missing_frontmatter_field", material)
+
+    def test_audit_reports_failed_files(self):
+        dreams = self.home / "dreams"
+        dreams.mkdir(parents=True, exist_ok=True)
+        (dreams / "2026-10-04.md").write_text(
+            "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+            "commit: none\n---\n\n# 2026-10-04\n\n"
+            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + "\n",
+            encoding="utf-8",
+        )
+        (dreams / "2026-10-05.md").write_text("---\ndate: 2026-10-05\n---\n本文だけ。\n", encoding="utf-8")
+        res = core.audit_diaries(home=self.home, days=5, repos=[self.repo])
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["checked"], 2)
+        self.assertEqual(res["failed"], ["2026-10-05.md"])
+
+    def test_author_falls_back_from_root_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_home = Path(tmp) / ".hermes"
+            res = core.write_skeleton(DAY, home=root_home)
+            text = Path(res["path"]).read_text(encoding="utf-8")
+            self.assertIn('author: "@agent"', text)
+            self.assertNotIn(".hermes", text.split("---")[1])
+
+
 class SkeletonTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

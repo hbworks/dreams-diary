@@ -1,7 +1,9 @@
-"""Profile-local cron bridge to the shared Dreams Diary material CLI.
+"""Profile-local cron bridge to the shared Dreams Diary CLI.
 
 Hermes cron only runs scripts resolved inside the active profile's scripts/ directory.
-This bridge keeps the plugin CLI as the source of truth without copying its implementation.
+This bridge keeps the plugin CLI as the single source of truth without copying its
+implementation. The sibling ``dreams_diary_validate.py`` is a thin shim over ``run()``
+so the two entry points cannot drift apart.
 """
 
 from __future__ import annotations
@@ -33,10 +35,14 @@ def _plugin_cli() -> Path:
     )
 
 
-def main() -> None:
+def run(command: str = "material") -> None:
     cli = _plugin_cli()
-    sys.argv = [str(cli), "material"]
+    sys.argv = [str(cli), command]
     runpy.run_path(str(cli), run_name="__main__")
+
+
+def main() -> None:
+    run("material")
 
 
 if __name__ == "__main__":
