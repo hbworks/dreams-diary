@@ -153,6 +153,29 @@ class SkeletonTests(unittest.TestCase):
         forced = core.write_skeleton(DAY, home=self.home, force=True)
         self.assertTrue(forced["ok"])
 
+    def test_skeleton_with_counts_passes_own_validator(self):
+        # 雛形と検査の食い違いを塞ぐ: 実測値を渡せば、作った時点で valid
+        res = core.write_skeleton(DAY, home=self.home, sessions=2, messages=7)
+        self.assertTrue(res["counts_filled"])
+        text = Path(res["path"]).read_text(encoding="utf-8")
+        self.assertIn("sessions: 2", text)
+        self.assertIn("messages: 7", text)
+        checked = core.validate_diary(path=res["path"], home=self.home, repos=[])
+        self.assertTrue(checked["ok"], checked)
+        self.assertNotIn("invalid_frontmatter_field", checked["errors"])
+
+    def test_skeleton_without_counts_still_leaves_blanks(self):
+        # 推測で 0 を入れない: 省略時は空欄のまま
+        res = core.write_skeleton(DAY, home=self.home)
+        self.assertFalse(res["counts_filled"])
+        self.assertIn("sessions:\n", Path(res["path"]).read_text(encoding="utf-8"))
+
+    def test_skeleton_rejects_negative_counts(self):
+        with self.assertRaises(ValueError):
+            core.write_skeleton(DAY, home=self.home, sessions=-1)
+        with self.assertRaises(ValueError):
+            core.write_skeleton(DAY, home=self.home, messages="many")
+
 
 class ValidateTests(unittest.TestCase):
     def setUp(self):

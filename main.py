@@ -368,13 +368,35 @@ def write_skeleton(
     home: Optional[Path] = None,
     author: Optional[str] = None,
     force: bool = False,
+    sessions: Optional[int] = None,
+    messages: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """節構成だけ入った空の日記を用意する。本文はエージェントが書く。"""
+    """節構成だけ入った空の日記を用意する。本文はエージェントが書く。
+
+    sessions / messages は素材で観測した実測値を渡す。省略時は空欄のまま残し、
+    エージェントが素材から転記する（推測で 0 を埋めない）。
+    """
     day = _valid_date(day)
     home = home or resolve_profile_home()
     ddir = home / "dreams"
     ddir.mkdir(parents=True, exist_ok=True)
     path = ddir / f"{day}.md"
+
+    def count(key: str, value: Optional[int]) -> str:
+        if value is None:
+            return ""
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} は 0 以上の整数で指定してください（受領: {value!r}）") from exc
+        if number < 0:
+            raise ValueError(f"{key} は 0 以上の整数で指定してください（受領: {value!r}）")
+        return str(number)
+
+    sessions_text = count("sessions", sessions)
+    messages_text = count("messages", messages)
+    sessions_field = f" {sessions_text}" if sessions_text else ""
+    messages_field = f" {messages_text}" if messages_text else ""
     if path.exists() and not force:
         return {
             "ok": False,
@@ -387,8 +409,8 @@ def write_skeleton(
         "---\n"
         f'date: {day}\n'
         f'author: "@{author}"\n'
-        "sessions:\n"
-        "messages:\n"
+        f"sessions:{sessions_field}\n"
+        f"messages:{messages_field}\n"
         "commit: none\n"
         "---\n\n"
         f"# {day}\n\n"
@@ -402,6 +424,7 @@ def write_skeleton(
         "path": str(path),
         "persona_path": str(persona) if persona.exists() else None,
         "sections": list(SECTIONS),
+        "counts_filled": bool(sessions_text or messages_text),
         "message": "節見出しだけ置いた。素材を読み、自分の声で各節を埋めること。",
     }
 

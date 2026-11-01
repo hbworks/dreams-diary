@@ -44,6 +44,8 @@ _WRITE_SCHEMA = {
     "description": (
         "その日の日記ファイルを、frontmatter と6つの節見出しだけの状態で用意する。"
         "本文は書かない。エージェントが dreams_material を読んで自分の声で各節を埋める。"
+        "sessions / messages には素材で観測した実測値を渡せる（省略時は空欄のまま残る。"
+        "推測で 0 を入れない）。"
     ),
     "parameters": {
         "type": "object",
@@ -51,6 +53,16 @@ _WRITE_SCHEMA = {
             "date": {"type": "string", "description": "YYYY-MM-DD。省略時は今日。"},
             "author": {"type": "string", "description": "frontmatter に書く作者名。省略時はプロファイル名。"},
             "force": {"type": "boolean", "description": "既存ファイルを上書きする。既定 false。", "default": False},
+            "sessions": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "その日のセッション数。素材に書かれた実測値だけを渡す。省略時は空欄。",
+            },
+            "messages": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "その日のメッセージ数。素材に書かれた実測値だけを渡す。省略時は空欄。",
+            },
         },
     },
 }
@@ -93,6 +105,8 @@ def _write_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
         home=home,
         author=args.get("author"),
         force=bool(args.get("force")),
+        sessions=args.get("sessions"),
+        messages=args.get("messages"),
     )
     return core.json_dumps(result)
 
