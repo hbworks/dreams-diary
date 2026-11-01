@@ -38,27 +38,43 @@ ln -s ~/Dev/git/hermes-plugins/dreams-diary ~/.hermes/plugins/dreams-diary
 ln -s ~/.hermes/plugins/dreams-diary ~/.hermes/profiles/<profile>/plugins/dreams-diary
 ```
 
-Then add `dreams-diary` to `plugins.enabled` in `~/.hermes/profiles/<profile>/config.yaml`
-and restart the agent so the tools register.
+Enable it through the profile-aware CLI (do not edit `config.yaml` directly), then restart
+the agent so the tools register:
+
+```sh
+hermes -p <profile> plugins enable dreams-diary
+```
 
 ## Nightly cron (per profile)
 
-Scheduling is core, not plugin — register one job per agent:
+Scheduling is core, not plugin — register one job per agent. Hermes confines cron scripts
+resolved to the active profile's `HERMES_HOME/scripts/`; an absolute path to the plugin's
+`cli.py` under `plugins/` is rejected. The small bridge keeps the plugin CLI as the single
+source of truth while satisfying that path boundary.
 
-```
-cronjob_manage(action='create',
-  name='dreams-diary',
-  schedule='30 23 * * *',
-  script='/Users/masato/.hermes/plugins/dreams-diary/cli.py',
-  continuity=true,
-  prompt='素材Markdownが上部に注入されている。dreams_write で雛形を作り、
-          自分の声で6節を埋めて日記を完成させ、dreams_validate が ok になるまで直す。
-          最後の応答は3行以内（パスと一言）。')
+```sh
+cd ~/Dev/git/hermes-plugins/dreams-diary
+PROFILE=research
+PROFILE_HOME="$HOME/.hermes/profiles/$PROFILE"
+mkdir -p "$PROFILE_HOME/scripts"
+cp scripts/dreams_diary_material.py "$PROFILE_HOME/scripts/"
+hermes -p "$PROFILE" plugins enable dreams-diary
+hermes -p "$PROFILE" cron create "30 23 * * *" \
+  --name dreams-diary \
+  --script dreams_diary_material.py \
+  --continuity \
+  "$(python3 -c 'from pathlib import Path; print(Path("templates/cron-prompt.md").read_text())')"
 ```
 
-`python3 cli.py material [YYYY-MM-DD]` prints the material pack on stdout, so it can be
-used directly as the cron `script`. `cli.py validate [date]` exits non-zero on failure,
-which makes it usable as a gate in any pipeline.
+`templates/cron-prompt.md` is the shared prompt; it requires each profile to use its own
+voice and validate the exact diary path. It intentionally uses the absolute `日記ファイル:`
+path from the pre-run material instead of calling `dreams_write` or date-only `dreams_material`:
+those tool defaults can resolve to the root home in a cron worker. Use the validator's explicit
+`path` argument. `templates/persona.md` is an optional blank starting point, not a shared voice
+to copy verbatim. Keep the one-cron-per-profile convention unless you intentionally change that design.
+
+`python3 cli.py material [YYYY-MM-DD]` prints and saves a material pack.
+`python3 cli.py validate [YYYY-MM-DD]` returns non-zero when the canonical diary is missing or has errors; use it for manual checks or pipelines, not as a cron `script` outside the profile's `scripts/`.
 
 ## The six sections
 
@@ -90,7 +106,7 @@ game error codes — is ignored unless the surrounding line is about a commit.
 python3 -m unittest discover -s tests
 ```
 
-14 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
+18 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
 throwaway git repo, so nothing touches real data.
 
 ---
@@ -103,6 +119,20 @@ throwaway git repo, so nothing touches real data.
 プラグインが持つのは**機械部分だけ**（素材収集・雛形・検査・目次）で、文章は各エージェントが
 自分の声で書く。プロファイルごとに `dreams/` を分けるので、@research の日記と @coding の
 日記は別物になる。声を共通化させないのが要点。
+
+### cron とテンプレート
+
+cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` 配下に解決されます。
+`plugins/` 内の `cli.py` を直接指定する絶対パスは拒否されるため、
+`scripts/dreams_diary_material.py` を各プロフィールの `scripts/` にコピーして、相対名で登録してください。
+このブリッジは共有プラグインの `cli.py material` を呼び出し、実装を重複させません。
+
+共通 cron プロンプトは `templates/cron-prompt.md`、任意の声の記入用ひな形は
+`templates/persona.md` です。枠だけを共有し、内容はプロフィールごとに書き分けます。
+cron では pre-run 素材にある `日記ファイル:` の絶対パスを使い、`dreams_write` や date のみの
+`dreams_material` は呼びません。Cron worker の tool home が root home に解決される場合があるため、
+`dreams_validate` には必ず生成したファイルの `path` を渡します。
+`cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。
 
 検査でいちばん効くのは **コミットハッシュの実在確認**。日付と時刻は正しいのに桁だけ
 作られたハッシュが混入する事故が実際に起きたため、`~/Dev/git` 配下の全リポジトリを横断して

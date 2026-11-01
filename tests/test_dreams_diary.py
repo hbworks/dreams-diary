@@ -8,8 +8,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -234,6 +236,51 @@ class IndexAndRegistrationTests(unittest.TestCase):
         # ハンドラは例外を握って JSON を返す
         out = ctx.calls[0][3]({"date": "not-a-date"})
         self.assertIn("error", out)
+
+
+class ProfileHomeTests(unittest.TestCase):
+    def test_context_local_hermes_home_beats_root_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            profile_home = root / "profiles" / "assistant"
+            profile_home.mkdir(parents=True)
+            host = types.ModuleType("hermes_constants")
+            host.get_hermes_home = lambda: profile_home
+            with patch.dict(os.environ, {
+                "HERMES_HOME": str(root),
+                "HERMES_PROFILE": "coding",
+            }), patch.dict(sys.modules, {"hermes_constants": host}):
+                self.assertEqual(core.resolve_profile_home(), profile_home)
+
+    def test_registered_tools_use_manager_scope_not_worker_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root-home"
+            profile_home = root / "profiles" / "assistant"
+            target = profile_home / "dreams" / f"{DAY}.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("existing diary", encoding="utf-8")
+            active_home = {"path": root}
+            host = types.ModuleType("hermes_constants")
+            host.get_hermes_home = lambda: active_home["path"]
+
+            class Ctx:
+                def __init__(self):
+                    self.calls = {}
+                    self._manager = types.SimpleNamespace(home_path=profile_home)
+
+                def register_tool(self, name, toolset, schema, handler):
+                    self.calls[name] = handler
+
+            import __init__ as plugin  # noqa: PLC0415
+
+            with patch.dict(sys.modules, {"hermes_constants": host}):
+                ctx = Ctx()
+                plugin.register(ctx)
+                result = ctx.calls["dreams_write"]({"date": DAY})
+
+            self.assertIn(str(target), result)
+            self.assertIn('"reason": "exists"', result)
+            self.assertFalse((root / "dreams" / f"{DAY}.md").exists())
 
 
 if __name__ == "__main__":

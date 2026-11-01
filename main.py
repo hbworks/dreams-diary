@@ -45,13 +45,19 @@ MIN_CHARS_SOFT = 300
 def resolve_profile_home(profile: Optional[str] = None) -> Path:
     """アクティブなプロファイルの home を返す。
 
-    優先順: 明示指定 → HERMES_HOME → HERMES_PROFILE → ~/.hermes/active_profile
-    → ~/.hermes（default）。
+    優先順: 明示指定 → Hermes のコンテキストローカル home → HERMES_HOME →
+    HERMES_PROFILE → ~/.hermes/active_profile → ~/.hermes。
     """
     if profile and str(profile).strip():
         p = Path(os.path.expanduser(f"~/.hermes/profiles/{str(profile).strip()}"))
         if p.exists():
             return p
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        pass
+    else:
+        return Path(get_hermes_home()).expanduser()
     if os.environ.get("HERMES_HOME", "").strip():
         return Path(os.path.expanduser(os.environ["HERMES_HOME"].strip()))
     prof = os.environ.get("HERMES_PROFILE", "").strip()

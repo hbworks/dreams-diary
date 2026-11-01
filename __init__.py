@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict
 
 try:  # package import
@@ -77,37 +78,40 @@ _INDEX_SCHEMA = {
 }
 
 
-def _material_handler(args: Dict[str, Any], **_kw: Any) -> str:
+def _material_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
     result = core.collect_material(
         day=args.get("date"),
+        home=home,
         max_chars=int(args.get("max_chars") or core.DEFAULT_MAX_MATERIAL),
     )
     return result["material"] + f"\n\n（素材ファイル: {result['material_path']}）"
 
 
-def _write_handler(args: Dict[str, Any], **_kw: Any) -> str:
+def _write_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
     result = core.write_skeleton(
         day=args.get("date"),
+        home=home,
         author=args.get("author"),
         force=bool(args.get("force")),
     )
     return core.json_dumps(result)
 
 
-def _validate_handler(args: Dict[str, Any], **_kw: Any) -> str:
+def _validate_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
     return core.json_dumps(
-        core.validate_diary(day=args.get("date"), path=args.get("path"))
+        core.validate_diary(day=args.get("date"), path=args.get("path"), home=home)
     )
 
 
-def _index_handler(args: Dict[str, Any], **_kw: Any) -> str:
-    return core.json_dumps(core.build_index())
+def _index_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
+    return core.json_dumps(core.build_index(home=home))
 
 
-def _safe(fn: Callable[[Dict[str, Any]], str]) -> Callable[..., str]:
+def _safe(fn: Callable[..., str], home=None) -> Callable[..., str]:
     def wrapped(args: Dict[str, Any] | None = None, **kwargs: Any) -> str:
         try:
-            return fn(args or {})
+            kwargs["home"] = home
+            return fn(args or {}, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.exception("dreams-diary tool failed")
             return core.json_dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -125,15 +129,21 @@ TOOLS = (
 
 def register(ctx) -> None:
     """Hermes のプラグインコンテキストにツールを登録する。"""
+    # PluginContext has no public home accessor. Its manager's home_path is the exact registry
+    # scope for this plugin registration; capture it because tool handlers may run on workers
+    # where Hermes' ContextVar home override is not propagated.
+    manager = getattr(ctx, "_manager", None)
+    manager_home = getattr(manager, "home_path", None)
+    home = Path(manager_home) if manager_home is not None else core.resolve_profile_home()
     for name, schema, handler in TOOLS:
         if hasattr(ctx, "register_tool"):
             ctx.register_tool(
                 name=name,
                 toolset=TOOLSET,
                 schema=schema,
-                handler=_safe(handler),
+                handler=_safe(handler, home=home),
             )
         else:  # 古いコンテキスト互換
             register = getattr(ctx, "add_tool", None)
             if callable(register):
-                register(name, schema, _safe(handler))
+                register(name, schema, _safe(handler, home=home))
