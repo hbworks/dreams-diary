@@ -108,6 +108,26 @@ class MaterialTests(unittest.TestCase):
         self.assertTrue(got["truncated"])
         self.assertLessEqual(len(got["material"]), 200)
 
+    def test_material_file_keeps_full_text_when_truncated(self):
+        # 返り値は切り詰めてよいが、_material 側は全文でなければ案内文が嘘になる
+        got = core.collect_material(DAY, home=self.home, max_chars=400, repos=[self.repo])
+        self.assertTrue(got["truncated"])
+        self.assertLess(len(got["material"]), got["full_chars"])
+        full = Path(got["material_path"]).read_text(encoding="utf-8")
+        self.assertEqual(len(full), got["full_chars"])
+        self.assertIn(self.sha, full)
+
+    def test_truncation_keeps_commit_and_memory_sections(self):
+        # 会話が上限を食っても、根拠になる「コミット」「memory」節は落とさない
+        with patch.object(core, "_sessions_material", return_value="会話の行。\n" * 2000):
+            got = core.collect_material(DAY, home=self.home, max_chars=1000, repos=[self.repo])
+        material = got["material"]
+        self.assertTrue(got["truncated"])
+        self.assertLessEqual(len(material), 1200)
+        self.assertIn("## コミット", material)
+        self.assertIn(self.sha, material)
+        self.assertIn("テスト用の記憶", material)
+
 
 class SkeletonTests(unittest.TestCase):
     def setUp(self):
@@ -237,6 +257,35 @@ class ValidateTests(unittest.TestCase):
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertTrue(res["ok"], res)
         self.assertIn("unverified_external_hash", [i["code"] for i in res["issues"]])
+
+
+class RepoDiscoveryTests(unittest.TestCase):
+    def test_nested_repos_are_discovered(self):
+        # ~/Dev/git/<group>/<repo> のような入れ子も見つける（1階層だけだと捏造扱いになる）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _ = make_repo(root)  # root/repos/demorepo（深さ2）
+            found = core.discover_repos(base=str(root))
+            self.assertIn(repo, found)
+
+    def test_hash_in_nested_repo_validates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = make_profile(root)
+            _, sha = make_repo(root)
+            diary = home / "dreams" / f"{DAY}.md"
+            diary.parent.mkdir(parents=True, exist_ok=True)
+            diary.write_text(
+                f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+                f"commit: {sha}\n---\n\n# {DAY}\n\n"
+                + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+                + "\n",
+                encoding="utf-8",
+            )
+            res = core.validate_diary(
+                path=str(diary), home=home, repos=core.discover_repos(base=str(root))
+            )
+            self.assertTrue(res["ok"], res)
 
 
 class IndexAndRegistrationTests(unittest.TestCase):

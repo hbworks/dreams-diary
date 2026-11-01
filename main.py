@@ -206,16 +206,35 @@ def _memory_material(day: str, home: Path) -> str:
     return "\n".join(f"- [{c}] {_clip(t, 160)}" for c, t in rows) + "\n"
 
 
-def discover_repos(base: Optional[str] = None) -> List[Path]:
-    """ハッシュ検証に使うリポジトリ一覧。環境変数 DREAMS_REPOS で上書き可。"""
+REPO_SCAN_MAX_DEPTH = 3
+REPO_SCAN_SKIP = {"node_modules", "venv", "__pycache__", "site-packages", "build", "dist"}
+
+
+def discover_repos(base: Optional[str] = None, max_depth: int = REPO_SCAN_MAX_DEPTH) -> List[Path]:
+    """ハッシュ検証に使うリポジトリ一覧。環境変数 DREAMS_REPOS で上書き可。
+
+    1階層だけを見ると `~/Dev/git/<group>/<repo>` のような入れ子のリポジトリが
+    「存在しない」ことになり、実在するコミットを捏造と誤判定する。深さ3まで辿る。
+    """
     env = os.environ.get("DREAMS_REPOS", "").strip()
     if env:
         return [Path(os.path.expanduser(p)) for p in env.split(":") if p.strip()]
     root = Path(os.path.expanduser(base or "~/Dev/git"))
+    if not root.is_dir():
+        return []
     repos: List[Path] = []
-    for cand in (root, *sorted(root.glob("*"))):
-        if (cand / ".git").exists():
-            repos.append(cand)
+    for dirpath, dirnames, _ in os.walk(root):
+        current = Path(dirpath)
+        if (current / ".git").exists():
+            repos.append(current)
+            dirnames[:] = []  # リポジトリの中は別リポジトリを探さない
+            continue
+        depth = len(current.parts) - len(root.parts)
+        dirnames[:] = sorted(
+            d for d in dirnames if not d.startswith(".") and d not in REPO_SCAN_SKIP
+        )
+        if depth >= max_depth:
+            dirnames[:] = []
     return repos
 
 
@@ -260,31 +279,83 @@ def collect_material(
     home = home or resolve_profile_home()
     ddir = home / "dreams"
     diary = ddir / f"{day}.md"
-    body = (
+    header = (
         f"# 夢日記の素材 — {day}\n\n"
         f"生成: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')} / プロファイル: {home.name}\n"
         f"日記ファイル: {diary} （{'あり（上書き禁止）' if diary.exists() else 'なし'}）\n\n"
-        f"## 会話\n{_sessions_material(day, home)}\n"
-        f"## コミット\n{_commits_material(day, repos)}\n"
-        f"## この日 memory に追加された項目\n{_memory_material(day, home)}\n"
     )
-    truncated = len(body) > max_chars
-    body = body[:max_chars]
-    if truncated:
-        body += "\n\n（素材は上限で切り詰められた。全文は _material 側のファイルを見る）\n"
+    conversation = _sessions_material(day, home)
+    commits = _commits_material(day, repos)
+    memory = _memory_material(day, home)
+    body_full = (
+        header
+        + f"## 会話\n{conversation}\n"
+        + f"## コミット\n{commits}\n"
+        + f"## この日 memory に追加された項目\n{memory}\n"
+    )
+
+    # 全文は必ず _material 側へ保存する。ここを切り詰めると「全文はそちらを見る」
+    # という案内が嘘になり、根拠の再確認ができなくなる。
     material_path = ddir / "_material" / f"{day}.md"
+    material_saved = True
     try:
         material_path.parent.mkdir(parents=True, exist_ok=True)
-        material_path.write_text(body, encoding="utf-8")
+        material_path.write_text(body_full, encoding="utf-8")
     except OSError:
-        pass
+        material_saved = False
+
+    truncated = len(body_full) > max_chars
+    body = body_full
+    if truncated:
+        conv_head = "## 会話\n"
+        commit_head = "\n## コミット\n"
+        mem_head = "\n## この日 memory に追加された項目\n"
+        fixed = len(header) + len(conv_head) + len(commit_head) + len(mem_head)
+        note = f"（素材は上限 {max_chars} 字に合わせて切り詰めた。全文: {material_path}）\n"
+        available = max_chars - fixed - len(note)
+        if available < 100:
+            body = body_full[: max(0, max_chars)] + "\n（素材は上限で切り詰めた）\n"
+        else:
+            # 根拠（コミット・memory）に最低限の枠を確保してから、残りを会話に回す。
+            # 会話が長い日に根拠節ごと消えると、日記の裏付けが失われる。
+            ev_body = len(commits) + len(memory)
+            ev_budget = min(ev_body, max(300, int(available * 0.4)))
+            mem_budget = min(len(memory), max(0, min(400, ev_budget)))
+            commit_budget = max(0, ev_budget - mem_budget)
+            conv_budget = max(0, available - ev_budget)
+            conv_text = (
+                conversation
+                if len(conversation) <= conv_budget
+                else conversation[:conv_budget] + "\n（会話は上限で切り詰めた）\n"
+            )
+            commit_text = (
+                commits
+                if len(commits) <= commit_budget
+                else commits[:commit_budget] + "\n（コミットは上限で切り詰めた）\n"
+            )
+            memory_text = (
+                memory if len(memory) <= mem_budget else memory[:mem_budget] + "\n"
+            )
+            body = (
+                header
+                + conv_head
+                + conv_text
+                + commit_head
+                + commit_text
+                + mem_head
+                + memory_text
+                + note
+            )
     return {
         "date": day,
         "profile_home": str(home),
         "material_path": str(material_path),
+        "material_saved": material_saved,
         "diary_path": str(diary),
         "diary_exists": diary.exists(),
         "truncated": truncated,
+        "chars": len(body),
+        "full_chars": len(body_full),
         "material": body,
     }
 

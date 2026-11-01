@@ -11,7 +11,7 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 
 | Tool | Purpose |
 | :--- | :--- |
-| `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git/*`, and memory rows added that day. Also saved to `dreams/_material/<date>.md`. |
+| `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file always holds the full text, even when the returned pack is capped by `max_chars`. |
 | `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`. |
 | `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports char count, and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
 | `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
@@ -95,7 +95,10 @@ to copy verbatim. Keep the one-cron-per-profile convention unless you intentiona
   what they said (`「〜と言っていた」`), never assert their inner state.
 - `too_short` / `too_long` (warn) — under 300 or over 3000 characters (whitespace excluded).
 - `unresolved_hash` (error) — a hash written in commit context does not exist in any repo
-  under `~/Dev/git`. This catches the most common LLM failure in this format: a hash whose
+  under `~/Dev/git`. The scan is recursive (depth 3), so nested layouts such as
+  `~/Dev/git/<group>/<repo>/.git` are included; `DREAMS_REPOS` (colon-separated) pins the set
+  explicitly when a repo lives outside that tree. This catches the most common LLM failure in
+  this format: a hash whose
   date and time are right but whose digits were invented.
 - `unverified_external_hash` (warn) — an upstream commit (e.g. `origin/main`) that cannot be
   verified locally.
