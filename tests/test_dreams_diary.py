@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import io
 import os
 import sqlite3
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -312,6 +314,21 @@ class RepoDiscoveryTests(unittest.TestCase):
 
 
 class IndexAndRegistrationTests(unittest.TestCase):
+    def test_index_skips_unreadable_file(self):
+        # 1本壊れても目次全体を失わない。理由は INDEX に残す
+        with tempfile.TemporaryDirectory() as tmp:
+            home = make_profile(Path(tmp))
+            core.write_skeleton(DAY, home=home)
+            broken = home / "dreams" / "2026-10-06.md"
+            broken.write_bytes(b"\xff\xfe\x00bad")
+            res = core.build_index(home=home)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["count"], 1)
+            self.assertEqual([s["file"] for s in res["skipped"]], ["2026-10-06.md"])
+            index = Path(res["path"]).read_text(encoding="utf-8")
+            self.assertIn("読めなかった日記", index)
+            self.assertIn("2026-10-06.md", index)
+
     def test_index_counts_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = make_profile(Path(tmp))
@@ -386,6 +403,89 @@ class ProfileHomeTests(unittest.TestCase):
             self.assertIn(str(target), result)
             self.assertIn('"reason": "exists"', result)
             self.assertFalse((root / "dreams" / f"{DAY}.md").exists())
+
+
+class ProfileSourceTests(unittest.TestCase):
+    """home 解決の経路が呼び出し側に分かること（黙って別プロファイルへ落ちない）。"""
+
+    def _stub(self, root: Path):
+        stub = types.ModuleType("hermes_constants")
+        stub.get_hermes_home = lambda: root
+        stub.get_hermes_home_override = lambda: None
+        return stub
+
+    def test_active_profile_is_reported_as_unreliable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            (root / "profiles" / "bloger").mkdir(parents=True)
+            (root / "active_profile").write_text("bloger\n", encoding="utf-8")
+            with patch.dict(os.environ, {"HOME": tmp, "HERMES_HOME": "", "HERMES_PROFILE": ""}), \
+                 patch.dict(sys.modules, {"hermes_constants": self._stub(root)}):
+                home, source = core.resolve_profile_home_source()
+            self.assertEqual(source, "active_profile")
+            self.assertEqual(home.name, "bloger")
+
+    def test_env_home_is_reliable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            profile_home = root / "profiles" / "research"
+            profile_home.mkdir(parents=True)
+            with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}), \
+                 patch.dict(sys.modules, {"hermes_constants": self._stub(root)}):
+                home, source = core.resolve_profile_home_source()
+            self.assertEqual(source, "env")
+            self.assertEqual(home, profile_home)
+
+    def test_explicit_profile_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            (root / "profiles" / "bloger").mkdir(parents=True)
+            (root / "active_profile").write_text("bloger\n", encoding="utf-8")
+            with patch.dict(os.environ, {"HOME": tmp, "HERMES_HOME": "", "HERMES_PROFILE": ""}), \
+                 patch.dict(sys.modules, {"hermes_constants": self._stub(root)}):
+                home, source = core.resolve_profile_home_source("bloger")
+            self.assertEqual(source, "explicit")
+            self.assertEqual(home.name, "bloger")
+
+
+class CliTests(unittest.TestCase):
+    def test_cli_warns_when_profile_is_unscoped(self):
+        import cli as cli_mod  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            (root / "profiles" / "bloger").mkdir(parents=True)
+            (root / "active_profile").write_text("bloger\n", encoding="utf-8")
+            stub = types.ModuleType("hermes_constants")
+            stub.get_hermes_home = lambda: root
+            stub.get_hermes_home_override = lambda: None
+            err = io.StringIO()
+            with patch.dict(os.environ, {"HOME": tmp, "HERMES_HOME": "", "HERMES_PROFILE": ""}), \
+                 patch.dict(sys.modules, {"hermes_constants": stub}), \
+                 redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = cli_mod.main(["index"])
+            self.assertEqual(code, 0)
+            self.assertIn("警告", err.getvalue())
+            self.assertIn("bloger", err.getvalue())
+
+    def test_cli_profile_flag_is_silent(self):
+        import cli as cli_mod  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            (root / "profiles" / "bloger").mkdir(parents=True)
+            (root / "profiles" / "tester").mkdir(parents=True)
+            (root / "active_profile").write_text("bloger\n", encoding="utf-8")
+            stub = types.ModuleType("hermes_constants")
+            stub.get_hermes_home = lambda: root
+            stub.get_hermes_home_override = lambda: None
+            err = io.StringIO()
+            with patch.dict(os.environ, {"HOME": tmp, "HERMES_HOME": "", "HERMES_PROFILE": ""}), \
+                 patch.dict(sys.modules, {"hermes_constants": stub}), \
+                 redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = cli_mod.main(["--profile", "tester", "index"])
+            self.assertEqual(code, 0)
+            self.assertEqual(err.getvalue(), "")
 
 
 if __name__ == "__main__":

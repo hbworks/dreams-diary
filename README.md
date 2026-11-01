@@ -76,6 +76,20 @@ to copy verbatim. Keep the one-cron-per-profile convention unless you intentiona
 `python3 cli.py material [YYYY-MM-DD]` prints and saves a material pack.
 `python3 cli.py validate [YYYY-MM-DD]` returns non-zero when the canonical diary is missing or has errors; use it for manual checks or pipelines, not as a cron `script` outside the profile's `scripts/`.
 
+Every CLI command accepts `--profile <name>` (or `-p`). Without it, the CLI resolves the home
+from Hermes' context-local override, then `HERMES_HOME`, then `HERMES_PROFILE`, and only then
+`~/.hermes/active_profile` — a global pointer to whichever profile was last used. When it has to
+fall back to `active_profile` or the bare `~/.hermes` root, it prints a warning naming the home it
+picked, so a stray shell invocation cannot silently read or write another agent's diary:
+
+```sh
+$ env -u HERMES_HOME python3 cli.py material 2026-11-01
+警告: プロファイルを特定できませんでした（解決経路: active_profile）。/Users/…/profiles/assistant を使います。…
+```
+
+`dreams_index` / `cli.py index` never fails on a single bad file: unreadable diaries are skipped,
+reported in `skipped`, and listed in `INDEX.md` under 読めなかった日記 so the gap stays visible.
+
 ## The six sections
 
 1. 今日、何を見ていたか — factual, with times
@@ -138,6 +152,12 @@ cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` �
 cron では pre-run 素材にある `日記ファイル:` の絶対パスを使い、`dreams_write` や date のみの
 `dreams_material` は呼びません。Cron worker の tool home が root home に解決される場合があるため、
 `dreams_validate` には必ず生成したファイルの `path` を渡します。
+
+手元で CLI を使うときは `--profile <name>`（または `-p`）を付けてください。付けない場合の
+解決順は コンテキストローカル → `HERMES_HOME` → `HERMES_PROFILE` → `~/.hermes/active_profile`
+（最後に触ったプロファイルを指す共通ポインタ）です。`active_profile` や `~/.hermes` 直下に
+落ちたときは、選んだ home を名指しして警告を出します。`cli.py index` は読めない日記が1本あっても
+全体を落とさず、`skipped` と INDEX の「読めなかった日記」に残します。
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。
 検証には `date` / `author` / `sessions` / `messages` / `commit` を含む frontmatter が必要で、
 `date` はファイル名の日付と一致しなければなりません。これで素材パックを日記と誤認する

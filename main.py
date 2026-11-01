@@ -43,28 +43,45 @@ MIN_CHARS_SOFT = 300
 
 
 def resolve_profile_home(profile: Optional[str] = None) -> Path:
-    """アクティブなプロファイルの home を返す。
+    """アクティブなプロファイルの home を返す（解決経路は resolve_profile_home_source を見る）。"""
+    return resolve_profile_home_source(profile)[0]
 
-    優先順: 明示指定 → Hermes のコンテキストローカル home → HERMES_HOME →
-    HERMES_PROFILE → ~/.hermes/active_profile → ~/.hermes。
+
+def resolve_profile_home_source(profile: Optional[str] = None) -> Tuple[Path, str]:
+    """home と、その解決経路を返す。
+
+    経路: explicit（引数）→ context（Hermes のコンテキストローカル override）→
+    env（HERMES_HOME）→ profile_env（HERMES_PROFILE）→ active_profile（~/.hermes の共通ポインタ）
+    → root（~/.hermes）。
+
+    active_profile / root は「たまたま最後に触ったプロファイル」を指しうる。黙って
+    そこへ書くと別プロファイルの記憶や日記を壊すため、呼び出し側が警告できるよう
+    経路も返す。
     """
     if profile and str(profile).strip():
         p = Path(os.path.expanduser(f"~/.hermes/profiles/{str(profile).strip()}"))
         if p.exists():
-            return p
+            return p, "explicit"
     try:
-        from hermes_constants import get_hermes_home
+        import hermes_constants as hc
     except ImportError:
-        pass
-    else:
-        return Path(get_hermes_home()).expanduser()
-    if os.environ.get("HERMES_HOME", "").strip():
-        return Path(os.path.expanduser(os.environ["HERMES_HOME"].strip()))
+        hc = None
+    if hc is not None:
+        override_fn = getattr(hc, "get_hermes_home_override", None)
+        if callable(override_fn):
+            override = override_fn()
+            if override:
+                return Path(override).expanduser(), "context"
+        else:  # スタブ/旧版: 直接問い合わせる
+            return Path(hc.get_hermes_home()).expanduser(), "context"
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env:
+        return Path(os.path.expanduser(env)), "env"
     prof = os.environ.get("HERMES_PROFILE", "").strip()
     if prof:
         p = Path(os.path.expanduser(f"~/.hermes/profiles/{prof}"))
         if p.exists():
-            return p
+            return p, "profile_env"
     try:
         active = Path(os.path.expanduser("~/.hermes/active_profile"))
         if active.exists():
@@ -72,10 +89,10 @@ def resolve_profile_home(profile: Optional[str] = None) -> Path:
             if name:
                 p = Path(os.path.expanduser(f"~/.hermes/profiles/{name}"))
                 if p.exists():
-                    return p
+                    return p, "active_profile"
     except OSError:
         pass
-    return Path(os.path.expanduser("~/.hermes"))
+    return Path(os.path.expanduser("~/.hermes")), "root"
 
 
 def dreams_dir(home: Optional[Path] = None) -> Path:
@@ -654,10 +671,16 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
         return " ".join(m.group(1).split()) if m else ""
 
     rows = []
+    skipped: List[Dict[str, str]] = []
     for f in sorted(ddir.iterdir()):
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(-\d)?\.md", f.name):
             continue
-        text = f.read_text(encoding="utf-8")
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # 1本読めないだけで目次全体を失わない。理由は INDEX にも残す。
+            skipped.append({"file": f.name, "reason": f"{type(exc).__name__}: {exc}"})
+            continue
         rows.append((f.stem, field(text, "sessions"), field(text, "messages"), tail(text)))
     rows.sort(reverse=True)
 
@@ -669,9 +692,12 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
             out.append(" / ".join(meta))
         if t:
             out.append("\n" + (t if len(t) <= 200 else t[:199] + "…"))
+    if skipped:
+        out.append(f"\n## 読めなかった日記（{len(skipped)} 本）\n")
+        out.extend(f"- {item['file']} — {item['reason']}" for item in skipped)
     path = ddir / "INDEX.md"
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
-    return {"ok": True, "count": len(rows), "path": str(path)}
+    return {"ok": True, "count": len(rows), "path": str(path), "skipped": skipped}
 
 
 def json_dumps(obj: Any) -> str:
