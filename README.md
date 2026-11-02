@@ -57,7 +57,7 @@ cd ~/Dev/git/hermes-plugins/dreams-diary
 PROFILE=research
 PROFILE_HOME="$HOME/.hermes/profiles/$PROFILE"
 mkdir -p "$PROFILE_HOME/scripts"
-cp scripts/dreams_diary_material.py "$PROFILE_HOME/scripts/"
+cp scripts/dreams_diary_material.py scripts/dreams_diary_validate.py "$PROFILE_HOME/scripts/"
 hermes -p "$PROFILE" plugins enable dreams-diary
 hermes -p "$PROFILE" cron create "30 23 * * *" \
   --name dreams-diary \
@@ -97,6 +97,36 @@ backstop, every material pack starts with `## 前回の日記の検証`: the mos
 validated and a failure is printed with its codes and absolute path, which the cron prompt tells
 the agent to fix before writing today's entry. `cli.py audit [--days N]` does the same across the
 last N diaries for manual or pipeline use and exits non-zero when any fails.
+
+### Manual checks
+
+`cli.py` is the full entry point; the profile-local bridge is the same check without a plugin
+path, and it picks the profile for you.
+
+```sh
+python3 cli.py --profile research validate 2026-10-22
+python3 cli.py --profile research validate --path ~/.hermes/profiles/research/dreams/2026-11-01-3.md
+python3 cli.py --profile research audit --days 7
+
+# manual bridge run: profile auto-detected, date optional
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py 2026-08-22
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py --profile buddy
+```
+
+Without `--profile`, the bridge resolves the profile in this order: `HERMES_HOME` (set by cron
+and the in-app terminal) → `HERMES_SESSION_PROFILE` → Hermes Desktop's
+`~/Library/Application Support/Hermes/active-profile.json` → `HERMES_PROFILE` → the profile with
+the most recently written `state.db`. The legacy `~/.hermes/active_profile` pointer is **not**
+used here: on this machine it still said `assistant` months after the switch to `research`.
+
+With no date, a `validate` checks the newest diary in a **two-day window** (today, then
+yesterday), including `-2` / `-3` variants, and validates it by path. That keeps an early-morning
+manual run pointed at yesterday's entry instead of failing on a file the nightly job has not
+written yet. An explicit `YYYY-MM-DD` or `--path` always wins.
+
+Exit codes: `0` valid, `1` invalid or missing, `2` usage/exception (stderr, no JSON — parse
+accordingly). The bridge only reads; it never writes to `dreams/`.
 
 ## Versioning
 
@@ -140,7 +170,7 @@ game error codes — is ignored unless the surrounding line is about a commit.
 python3 -m unittest discover -s tests
 ```
 
-22 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
+47 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
 throwaway git repo, so nothing touches real data.
 
 ---
@@ -159,6 +189,8 @@ throwaway git repo, so nothing touches real data.
 cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` 配下に解決されます。
 `plugins/` 内の `cli.py` を直接指定する絶対パスは拒否されるため、
 `scripts/dreams_diary_material.py` を各プロフィールの `scripts/` にコピーして、相対名で登録してください。
+手動検査用の `scripts/dreams_diary_validate.py` も同じ場所にコピーします（実装は material 側の
+`run()` を共有する薄いシムなので、2ファイルを必ず一緒に更新する）。
 このブリッジは共有プラグインの `cli.py material` を呼び出し、実装を重複させません。
 
 共通 cron プロンプトは `templates/cron-prompt.md`、任意の声の記入用ひな形は
@@ -172,7 +204,23 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 （最後に触ったプロファイルを指す共通ポインタ）です。`active_profile` や `~/.hermes` 直下に
 落ちたときは、選んだ home を名指しして警告を出します。`cli.py index` は読めない日記が1本あっても
 全体を落とさず、`skipped` と INDEX の「読めなかった日記」に残します。
-`cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。
+`cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。`--path FILE` で日記ファイルを
+直接指定できます（`-2` / `-3` の別名ファイルを検査するときに必要）。
+
+### 手動実行（ブリッジ）
+
+```sh
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py              # 今日→昨日の最新
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py 2026-08-22   # 日付指定
+python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py --profile buddy
+```
+
+プロファイル未指定時の解決順は `HERMES_HOME` → `HERMES_SESSION_PROFILE` →
+Hermes Desktop の `active-profile.json` → `HERMES_PROFILE` → 最後に `state.db` が更新された
+プロファイル。`~/.hermes/active_profile` は使わない（実機では `assistant` のまま古い）。
+日付未指定なら「今日」と「昨日」のうち最新の日記（`-2` / `-3` 含む）をパス指定で検査するので、
+深夜・早朝の手動実行でも前日の日記を見失わない。明示した日付・`--path` が常に優先。
+終了コードは 0=正常、1=不合格/不在、2=引数・例外（stderr のみで JSON は出ない）。
 検証には `date` / `author` / `sessions` / `messages` / `commit` を含む frontmatter が必要で、
 `date` はファイル名の日付と一致しなければなりません。これで素材パックを日記と誤認する
 ケースを検出します。

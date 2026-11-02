@@ -4,6 +4,7 @@
     python3 cli.py [--profile NAME] material [YYYY-MM-DD]   # 素材を stdout に出す
     python3 cli.py [--profile NAME] write    [YYYY-MM-DD]   # 節見出しだけの日記を作る
     python3 cli.py [--profile NAME] validate [YYYY-MM-DD]   # 検査（JSON）
+    python3 cli.py [--profile NAME] validate --path FILE    # ファイル指定で検査
     python3 cli.py [--profile NAME] audit   [--days N]      # 直近 N 本をまとめて検査
     python3 cli.py [--profile NAME] index                   # INDEX.md 再生成
 
@@ -25,9 +26,10 @@ import main as core  # noqa: E402
 UNRELIABLE_SOURCES = {"active_profile", "root"}
 
 
-def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str], int]:
-    """(--profile, command, date, days) を取り出す。フラグは前後どちらでもよい。"""
+def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str], int, Optional[str]]:
+    """(--profile, command, date, days, path) を取り出す。フラグは前後どちらでもよい。"""
     profile: Optional[str] = None
+    path: Optional[str] = None
     days = 7
     rest: List[str] = []
     args = list(argv)
@@ -40,6 +42,14 @@ def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str], int]:
             continue
         if item.startswith("--profile="):
             profile = item.split("=", 1)[1]
+            continue
+        if item == "--path":
+            if not args:
+                raise ValueError("--path には日記ファイルのパスが必要です")
+            path = args.pop(0)
+            continue
+        if item.startswith("--path="):
+            path = item.split("=", 1)[1]
             continue
         if item == "--days":
             if not args or not args[0].isdigit():
@@ -55,7 +65,7 @@ def _parse(argv: List[str]) -> Tuple[Optional[str], str, Optional[str], int]:
         rest.append(item)
     cmd = rest[0] if rest else "material"
     day = rest[1] if len(rest) > 1 else None
-    return profile, cmd, day, days
+    return profile, cmd, day, days, path
 
 
 def _warn_unscoped(home: Path, source: str) -> None:
@@ -69,7 +79,7 @@ def _warn_unscoped(home: Path, source: str) -> None:
 
 def main(argv: List[str]) -> int:
     try:
-        profile, cmd, day, days = _parse(argv)
+        profile, cmd, day, days, path = _parse(argv)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -82,7 +92,7 @@ def main(argv: List[str]) -> int:
         elif cmd == "write":
             print(core.json_dumps(core.write_skeleton(day, home=home)))
         elif cmd == "validate":
-            res = core.validate_diary(day, home=home)
+            res = core.validate_diary(day, path=path, home=home)
             print(core.json_dumps(res))
             return 0 if res.get("ok") else 1
         elif cmd == "audit":
