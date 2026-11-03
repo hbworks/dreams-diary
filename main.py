@@ -538,8 +538,44 @@ def _tool_call_summaries(rows: List[sqlite3.Row]) -> Dict[str, str]:
     return summaries
 
 
+def _successful_operations_material(day: str, home: Path) -> str:
+    """当日の成功したターミナル操作。"""
+    rows = _state_message_rows(day, home)
+    if rows is None:
+        return ""
+    summaries = _tool_call_summaries(rows)
+    items: List[Tuple[str, str, str]] = []
+    for row in rows:
+        if row["role"] != "tool" or row["tool_name"] != "terminal":
+            continue
+        payload = _parse_json_object(row["content"])
+        if payload is None:
+            continue
+        error = payload.get("error")
+        code = payload.get("exit_code")
+        successful_exit = (
+            isinstance(code, int) and not isinstance(code, bool) and code == 0
+        )
+        if error or not successful_exit:
+            continue
+
+        when = datetime.datetime.fromtimestamp(row["timestamp"]).strftime("%H:%M")
+        summary = summaries.get(str(row["tool_call_id"] or ""), "")
+        if summary:
+            items.append((when, row["tool_name"], summary))
+
+    if not items:
+        return ""
+
+    lines = ["## 成功した操作"]
+    for when, tool, summary in items[:FAIL_MAX_ITEMS]:
+        lines.append(f"- {when} {tool} — {summary}")
+    if len(items) > FAIL_MAX_ITEMS:
+        lines.append(f"- （ほか {len(items) - FAIL_MAX_ITEMS} 件）")
+    return "\n".join(lines) + "\n"
+
+
 def _failures_material(day: str, home: Path) -> str:
-    """当日のツール失敗（原因は未確認）。失敗＝間違いではない。"""
     rows = _state_message_rows(day, home)
     if rows is None:
         return "（state.db が無いか読めないため失敗を確認できない）\n"
@@ -806,6 +842,7 @@ def collect_material(
     )
     self_report = _self_report_material(day, home)
     conversation = _sessions_material(day, home)
+    successes = _successful_operations_material(day, home)
     failures = _failures_material(day, home)
     edited = _edited_files(day, home)
     commits = _commits_material(day, repos, edited)
@@ -821,6 +858,7 @@ def collect_material(
         + self_report
         + conv_head
         + conversation
+        + successes
         + fail_head
         + failures
         + commit_head
