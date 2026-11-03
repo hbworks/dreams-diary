@@ -89,7 +89,7 @@ def _parse(argv: List[str]) -> _Args:
 
 
 def _warn_unscoped(home: Path, source: str) -> None:
-    if source in UNRELIABLE_SOURCES:
+    if source in UNRELIABLE_SOURCES or core.is_root_home(home):
         print(
             f"警告: プロファイルを特定できませんでした（解決経路: {source}）。"
             f"{home} を使います。--profile <name> か HERMES_HOME を指定してください。",
@@ -152,7 +152,11 @@ def main(argv: List[str]) -> int:
         return 2
     if args.cmd == "prompt":
         return _prompt(args)
-    home, source = core.resolve_profile_home_source(args.profile)
+    try:
+        home, source = core.resolve_profile_home_source(args.profile)
+    except Exception as exc:  # noqa: BLE001 - invalid explicit profile is a usage error
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     _warn_unscoped(home, source)
     try:
         if args.cmd == "material":
@@ -169,7 +173,9 @@ def main(argv: List[str]) -> int:
             print(core.json_dumps(res))
             return 0 if res.get("ok") else 1
         elif args.cmd == "index":
-            print(core.json_dumps(core.build_index(home=home)))
+            res = core.build_index(home=home)
+            print(core.json_dumps(res))
+            return 0 if res.get("ok") else 1
         else:
             print(f"unknown command: {args.cmd}", file=sys.stderr)
             return 2

@@ -32,7 +32,7 @@ _MATERIAL_SCHEMA = {
             "date": {"type": "string", "description": "YYYY-MM-DD。省略時は今日。"},
             "max_chars": {
                 "type": "integer",
-                "description": "返す素材の上限文字数。既定 14000。",
+                "description": "返す Markdown 全体（保存先案内・切り詰め注記を含む）の上限。注記が入らない小さすぎる値はエラー。既定 14000。",
                 "default": core.DEFAULT_MAX_MATERIAL,
             },
         },
@@ -91,20 +91,31 @@ _INDEX_SCHEMA = {
 
 
 def _material_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
+    raw_max_chars = args.get("max_chars")
     result = core.collect_material(
         day=args.get("date"),
         home=home,
-        max_chars=int(args.get("max_chars") or core.DEFAULT_MAX_MATERIAL),
+        max_chars=(
+            core.DEFAULT_MAX_MATERIAL
+            if raw_max_chars is None
+            else int(raw_max_chars)
+        ),
+        include_material_path=True,
     )
-    return result["material"] + f"\n\n（素材ファイル: {result['material_path']}）"
+    return result["material"]
 
 
 def _write_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
+    force = args.get("force", False)
+    if force is None:
+        force = False
+    if not isinstance(force, bool):
+        raise ValueError(f"force は boolean で指定してください（受領: {force!r}）")
     result = core.write_skeleton(
         day=args.get("date"),
         home=home,
         author=args.get("author"),
-        force=bool(args.get("force")),
+        force=force,
         sessions=args.get("sessions"),
         messages=args.get("messages"),
     )
@@ -118,18 +129,6 @@ def _validate_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
 
 
 def _index_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
-    # cron worker ではツールの home が root（~/.hermes）へ解決されることがある。そのまま
-    # 書き込むと別ディレクトリに INDEX を作るので、プロファイルを特定できないときは断る。
-    if core.is_root_home(home):
-        return core.json_dumps(
-            {
-                "ok": False,
-                "error": (
-                    f"プロファイルを特定できない home が登録されている: {home}。"
-                    "INDEX は書かず、`python3 cli.py --profile <name> index` で再生成する。"
-                ),
-            }
-        )
     return core.json_dumps(core.build_index(home=home))
 
 
@@ -138,6 +137,9 @@ def _safe(fn: Callable[..., str], home=None) -> Callable[..., str]:
         try:
             kwargs["home"] = home
             return fn(args or {}, **kwargs)
+        except ValueError as exc:
+            logger.warning("dreams-diary tool rejected input: %s", exc)
+            return core.json_dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         except Exception as exc:  # noqa: BLE001
             logger.exception("dreams-diary tool failed")
             return core.json_dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})

@@ -106,10 +106,62 @@ class MaterialTests(unittest.TestCase):
         self.assertIn("0 件", got["material"])
         self.assertNotIn("取得失敗", got["material"])
 
+    def test_sessions_retry_wal_open_failure_with_normal_connection(self):
+        original_connect = sqlite3.connect
+        calls = []
+
+        def connect(*args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("unable to open database file")
+            return original_connect(*args, **kwargs)
+
+        with patch.object(core.sqlite3, "connect", side_effect=connect):
+            material = core._sessions_material(DAY, self.home)
+        self.assertIn("メッセージ 6 件", material)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("mode=ro", calls[0][0][0])
+        self.assertEqual(calls[1][0][0], str(self.home / "state.db"))
+
     def test_material_truncates(self):
-        got = core.collect_material(DAY, home=self.home, max_chars=80, repos=[self.repo])
+        got = core.collect_material(DAY, home=self.home, max_chars=300, repos=[self.repo])
         self.assertTrue(got["truncated"])
-        self.assertLessEqual(len(got["material"]), 200)
+        self.assertLessEqual(len(got["material"]), 300)
+        self.assertEqual(got["chars"], len(got["material"]))
+        self.assertIn(str(Path(got["material_path"])), got["material"])
+
+    def test_material_rejects_budget_too_small_for_truncation_notice(self):
+        with self.assertRaisesRegex(ValueError, "max_chars|字以上"):
+            core.collect_material(DAY, home=self.home, max_chars=10, repos=[self.repo])
+        self.assertFalse((self.home / "dreams" / "_material" / f"{DAY}.md").exists())
+
+    def test_failed_material_save_does_not_claim_a_full_text_path(self):
+        with patch.object(Path, "write_text", side_effect=PermissionError("read-only")), \
+             patch.object(core, "_sessions_material", return_value="会話。\n" * 2000):
+            got = core.collect_material(DAY, home=self.home, max_chars=500, repos=[self.repo])
+        self.assertFalse(got["material_saved"])
+        self.assertIn("全文の保存に失敗した", got["material"])
+        self.assertNotIn(str(Path(got["material_path"])), got["material"])
+
+    def test_material_tool_omits_path_when_save_failed(self):
+        import __init__ as plugin  # noqa: PLC0415
+
+        material_path = self.home / "dreams" / "_material" / f"{DAY}.md"
+        with patch.object(Path, "write_text", side_effect=PermissionError("read-only")):
+            result = plugin._material_handler(
+                {"date": DAY, "max_chars": 14000}, home=self.home
+            )
+        self.assertIn("保存に失敗", result)
+        self.assertNotIn(str(material_path), result)
+
+    def test_material_tool_counts_the_saved_file_locator_in_its_limit(self):
+        import __init__ as plugin  # noqa: PLC0415
+
+        result = plugin._material_handler(
+            {"date": DAY, "max_chars": 300}, home=self.home
+        )
+        self.assertLessEqual(len(result), 300)
+        self.assertIn(str(self.home / "dreams" / "_material" / f"{DAY}.md"), result)
 
     def test_material_file_keeps_full_text_when_truncated(self):
         # 返り値は切り詰めてよいが、_material 側は全文でなければ案内文が嘘になる
@@ -126,7 +178,7 @@ class MaterialTests(unittest.TestCase):
             got = core.collect_material(DAY, home=self.home, max_chars=1000, repos=[self.repo])
         material = got["material"]
         self.assertTrue(got["truncated"])
-        self.assertLessEqual(len(material), 1200)
+        self.assertLessEqual(len(material), 1000)
         self.assertIn("## コミット", material)
         self.assertIn(self.sha, material)
         self.assertIn("テスト用の記憶", material)
@@ -172,13 +224,29 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(res["checked"], 2)
         self.assertEqual(res["failed"], ["2026-10-05.md"])
 
+    def test_audit_orders_variants_by_numeric_suffix(self):
+        dreams = self.home / "dreams"
+        dreams.mkdir(parents=True, exist_ok=True)
+        for variant in (2, 10):
+            (dreams / f"{DAY}-{variant}.md").write_text("invalid diary", encoding="utf-8")
+        result = core.audit_diaries(home=self.home, days=2, repos=[])
+        self.assertEqual(
+            [row["file"] for row in result["results"]],
+            [f"{DAY}-10.md", f"{DAY}-2.md"],
+        )
+
     def test_author_falls_back_from_root_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             root_home = Path(tmp) / ".hermes"
-            res = core.write_skeleton(DAY, home=root_home)
-            text = Path(res["path"]).read_text(encoding="utf-8")
-            self.assertIn('author: "@agent"', text)
-            self.assertNotIn(".hermes", text.split("---")[1])
+            self.assertEqual(core._author_name(root_home), "agent")
+
+    def test_collect_material_refuses_to_write_under_root_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            (root / "profiles").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "プロファイル|profile"):
+                core.collect_material(DAY, home=root, repos=[])
+            self.assertFalse((root / "dreams").exists())
 
 
 class SkeletonTests(unittest.TestCase):
@@ -227,6 +295,27 @@ class SkeletonTests(unittest.TestCase):
             core.write_skeleton(DAY, home=self.home, sessions=-1)
         with self.assertRaises(ValueError):
             core.write_skeleton(DAY, home=self.home, messages="many")
+
+    def test_skeleton_refuses_to_write_under_root_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            (root / "profiles").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "プロファイル|profile"):
+                core.write_skeleton(DAY, home=root)
+            self.assertFalse((root / "dreams").exists())
+
+    def test_string_false_does_not_force_overwrite(self):
+        import __init__ as plugin  # noqa: PLC0415
+
+        result = core.write_skeleton(DAY, home=self.home)
+        path = Path(result["path"])
+        original = path.read_text(encoding="utf-8")
+        with patch.object(plugin.logger, "warning"):
+            response = plugin._safe(plugin._write_handler, home=self.home)(
+                {"date": DAY, "force": "false"}
+            )
+        self.assertFalse(json.loads(response)["ok"])
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
 
 
 class ValidateTests(unittest.TestCase):
@@ -335,6 +424,79 @@ class ValidateTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("unresolved_hash", res["errors"])
 
+    def test_quoted_frontmatter_commit_hash_is_verified(self):
+        body = self._good_body().replace("commit: none", 'commit: "deadbeefcafebabe"')
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertFalse(res["ok"])
+        self.assertIn("unresolved_hash", res["errors"])
+
+    def test_frontmatter_commit_list_hashes_are_verified(self):
+        body = self._good_body().replace(
+            "commit: none", "commit:\n  - deadbeefcafebabe"
+        )
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertFalse(res["ok"])
+        self.assertIn("unresolved_hash", res["errors"])
+
+    def test_frontmatter_commit_list_accepts_a_local_hash(self):
+        body = self._good_body().replace(
+            "commit: none", f'commit:\n  - "{self.sha}"'
+        )
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertTrue(res["ok"], res)
+
+    def test_comma_separated_frontmatter_hashes_are_all_verified(self):
+        body = self._good_body().replace(
+            "commit: none", f"commit: {self.sha}, deadbeefcafebabe"
+        )
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("unresolved_hash", res["errors"])
+
+    def test_non_hash_commit_description_remains_valid(self):
+        body = self._good_body().replace("commit: none", "commit: no commits recorded")
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertNotIn("invalid_frontmatter_field", res["errors"])
+
+    def test_hash_substring_in_commit_description_is_not_a_candidate(self):
+        body = self._good_body().replace("commit: none", "commit: notdeadbeefcafebabe")
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertNotIn("unresolved_hash", res["errors"])
+
+    def test_explicit_github_commit_url_remains_a_warning(self):
+        self._write(
+            self._good_body()
+            + "\nSource: https://github.com/acme/project/commit/deadbeefcafebabe\n"
+        )
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("unverified_external_hash", [issue["code"] for issue in res["issues"]])
+
+    def test_explicit_external_commit_label_remains_a_warning(self):
+        self._write(self._good_body() + "\nupstream commit `deadbeefcafebabe`\n")
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("unverified_external_hash", [issue["code"] for issue in res["issues"]])
+
+    def test_incidental_external_words_do_not_downgrade_local_hashes(self):
+        for marker in ("github.com", "upstream", "外部"):
+            with self.subTest(marker=marker):
+                self._write(
+                    self._good_body()
+                    + f"\nコミット `deadbeefcafebabe` を記録。参照先の説明: {marker}\n"
+                )
+                res = core.validate_diary(DAY, home=self.home, repos=[])
+                self.assertFalse(res["ok"], res)
+                self.assertIn("unresolved_hash", res["errors"])
+
     def test_non_commit_hex_tokens_are_ignored(self):
         noise = (
             "\n- hostname `605f4728ab04` が同じだった。\n"
@@ -352,6 +514,14 @@ class ValidateTests(unittest.TestCase):
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertTrue(res["ok"], res)
         self.assertIn("unverified_external_hash", [i["code"] for i in res["issues"]])
+
+    def test_external_hash_pair_accepts_the_particle_wo(self):
+        self._write(
+            self._good_body() + "\n`origin/main` を `deadbeefcafebabe` として参照した。\n"
+        )
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("unverified_external_hash", [issue["code"] for issue in res["issues"]])
 
 
 class RepoDiscoveryTests(unittest.TestCase):
@@ -384,6 +554,15 @@ class RepoDiscoveryTests(unittest.TestCase):
 
 
 class IndexAndRegistrationTests(unittest.TestCase):
+    def test_index_refuses_custom_root_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            (root / "profiles").mkdir(parents=True)
+            result = core.build_index(home=root)
+            self.assertFalse(result["ok"])
+            self.assertIn("error", result)
+            self.assertFalse((root / "dreams" / "INDEX.md").exists())
+
     def test_index_skips_unreadable_file(self):
         # 1本壊れても目次全体を失わない。理由は INDEX に残す
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,6 +586,20 @@ class IndexAndRegistrationTests(unittest.TestCase):
             res = core.build_index(home=home)
             self.assertEqual(res["count"], 2)
             self.assertIn("2026-10-06", Path(res["path"]).read_text(encoding="utf-8"))
+
+    def test_index_orders_variants_by_numeric_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = make_profile(Path(tmp))
+            dreams = home / "dreams"
+            dreams.mkdir(parents=True, exist_ok=True)
+            for variant in (2, 10):
+                (dreams / f"{DAY}-{variant}.md").write_text(
+                    f"---\ndate: {DAY}\ncommit: none\n---\n\n## 明日の自分へ\nvariant {variant}\n",
+                    encoding="utf-8",
+                )
+            result = core.build_index(home=home)
+            index = Path(result["path"]).read_text(encoding="utf-8")
+            self.assertLess(index.index(f"[{DAY}-10]"), index.index(f"[{DAY}-2]"))
 
     def test_index_reads_frontmatter_not_body(self):
         # frontmatter に無い項目を本文から拾うと目次が嘘になる。frontmatter だけを読む
@@ -454,8 +647,22 @@ class IndexAndRegistrationTests(unittest.TestCase):
         )
         self.assertTrue(all(c[1] == "dreams_diary" for c in ctx.calls))
         # ハンドラは例外を握って JSON を返す
-        out = ctx.calls[0][3]({"date": "not-a-date"})
+        with patch.object(plugin.logger, "warning"):
+            out = ctx.calls[0][3]({"date": "not-a-date"})
         self.assertIn("error", out)
+
+    def test_expected_input_error_does_not_log_traceback(self):
+        import __init__ as plugin  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = make_profile(Path(tmp))
+            wrapped = plugin._safe(plugin._material_handler, home=home)
+            with patch.object(plugin.logger, "warning") as warning, \
+                 patch.object(plugin.logger, "exception") as exception:
+                response = wrapped({"date": "not-a-date"})
+        self.assertIn("ValueError", response)
+        warning.assert_called_once()
+        exception.assert_not_called()
 
 
 class ProfileHomeTests(unittest.TestCase):
@@ -569,14 +776,91 @@ class ProfileSourceTests(unittest.TestCase):
             self.assertEqual(source, "explicit")
             self.assertEqual(home.name, "bloger")
 
+    def test_missing_explicit_profile_does_not_fall_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            research = root / "profiles" / "research"
+            research.mkdir(parents=True)
+            stub = self._stub(research)
+            with patch.dict(
+                os.environ,
+                {"HERMES_HOME": str(research), "HERMES_PROFILE": "research"},
+            ), patch.dict(sys.modules, {"hermes_constants": stub}):
+                with self.assertRaisesRegex(ValueError, "profile|プロファイル"):
+                    core.resolve_profile_home_source("this-profile-does-not-exist-xyz")
+
+    def test_explicit_profile_rejects_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            (root / "profiles" / "research").mkdir(parents=True)
+            stub = self._stub(root)
+            with patch.dict(
+                os.environ,
+                {"HERMES_HOME": "", "HERMES_PROFILE": ""},
+            ), patch.dict(sys.modules, {"hermes_constants": stub}):
+                for profile in ("..", "../..", "../custom-hermes"):
+                    with self.subTest(profile=profile), self.assertRaises(ValueError):
+                        core.resolve_profile_home_source(profile)
+
+    def test_root_home_detection_uses_profile_layout_not_dot_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            profile = root / "profiles" / "research"
+            profile.mkdir(parents=True)
+            self.assertTrue(core.is_root_home(root))
+            self.assertFalse(core.is_root_home(profile))
+
 
 class CliTests(unittest.TestCase):
+    def test_cli_index_returns_failure_when_root_home_is_refused(self):
+        import cli as cli_mod  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            (root / "profiles").mkdir(parents=True)
+            stub = types.ModuleType("hermes_constants")
+            stub.get_hermes_home = lambda: root
+            stub.get_hermes_home_override = lambda: None
+            out = io.StringIO()
+            err = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"HOME": tmp, "HERMES_HOME": str(root), "HERMES_PROFILE": ""},
+            ), patch.dict(sys.modules, {"hermes_constants": stub}), \
+                 redirect_stderr(err), redirect_stdout(out):
+                code = cli_mod.main(["index"])
+            self.assertEqual(code, 1)
+            self.assertFalse((root / "dreams" / "INDEX.md").exists())
+            self.assertFalse(json.loads(out.getvalue())["ok"])
+            self.assertIn("警告", err.getvalue())
+
+    def test_cli_rejects_missing_explicit_profile_instead_of_writing_fallback(self):
+        import cli as cli_mod  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            research = root / "profiles" / "research"
+            research.mkdir(parents=True)
+            stub = types.ModuleType("hermes_constants")
+            stub.get_hermes_home = lambda: research
+            stub.get_hermes_home_override = lambda: None
+            err = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"HERMES_HOME": str(research), "HERMES_PROFILE": "research"},
+            ), patch.dict(sys.modules, {"hermes_constants": stub}), \
+                 redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = cli_mod.main(["--profile", "missing", "write", DAY])
+            self.assertEqual(code, 2)
+            self.assertIn("missing", err.getvalue())
+            self.assertFalse((research / "dreams" / f"{DAY}.md").exists())
+
     def test_cli_warns_when_profile_is_unscoped(self):
         import cli as cli_mod  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".hermes"
-            (root / "profiles" / "bloger").mkdir(parents=True)
+            (root / "profiles" / "bloger" / "dreams").mkdir(parents=True)
             (root / "active_profile").write_text("bloger\n", encoding="utf-8")
             stub = types.ModuleType("hermes_constants")
             stub.get_hermes_home = lambda: root
@@ -595,8 +879,8 @@ class CliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".hermes"
-            (root / "profiles" / "bloger").mkdir(parents=True)
-            (root / "profiles" / "tester").mkdir(parents=True)
+            (root / "profiles" / "bloger" / "dreams").mkdir(parents=True)
+            (root / "profiles" / "tester" / "dreams").mkdir(parents=True)
             (root / "active_profile").write_text("bloger\n", encoding="utf-8")
             stub = types.ModuleType("hermes_constants")
             stub.get_hermes_home = lambda: root

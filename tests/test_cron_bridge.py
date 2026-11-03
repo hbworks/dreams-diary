@@ -16,9 +16,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = REPO_ROOT / "scripts" / "dreams_diary_material.py"
@@ -67,6 +69,17 @@ class CronBridgeTests(unittest.TestCase):
             "    json.dumps(sys.argv[1:]), encoding='utf-8')\n",
             encoding="utf-8",
         )
+        (plugin_dir / "main.py").write_text(
+            (REPO_ROOT / "main.py").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        core_scripts = plugin_dir / "scripts"
+        core_scripts.mkdir()
+        for filename in ("__init__.py", "dreams_diary_paths.py"):
+            (core_scripts / filename).write_text(
+                (REPO_ROOT / "scripts" / filename).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
         env = {
             **os.environ,
             "HOME": str(fake_home),
@@ -119,12 +132,13 @@ class CronBridgeTests(unittest.TestCase):
             for name in (
                 f"{yesterday.isoformat()}.md",
                 f"{yesterday.isoformat()}-2.md",
+                f"{yesterday.isoformat()}-10.md",
                 f"{older.isoformat()}.md",
             ):
                 (dreams / name).write_text("---\n---\n", encoding="utf-8")
             argv = self._run("dreams_diary_validate.py", env)
             self.assertIn("--path", argv)
-            self.assertTrue(argv[-1].endswith(f"{yesterday.isoformat()}-2.md"))
+            self.assertTrue(argv[-1].endswith(f"{yesterday.isoformat()}-10.md"))
 
     def test_today_wins_over_yesterday_variant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +225,54 @@ class ProfileResolutionTests(unittest.TestCase):
                 HERMES_PROFILE=None,
             ):
                 self.assertEqual(bridge.pick_profile([]), "tester")
+
+    def test_context_local_hermes_home_resolves_root_and_plugin_cli(self) -> None:
+        bridge = _load_bridge()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "custom-hermes"
+            profile = root / "profiles" / "tester"
+            plugin = profile / "plugins" / "dreams-diary"
+            plugin.mkdir(parents=True)
+            cli = plugin / "cli.py"
+            cli.write_text("", encoding="utf-8")
+            host = types.ModuleType("hermes_constants")
+            host.get_hermes_home = lambda: profile
+            with _env(
+                HOME=str(Path(tmp) / "home"),
+                HERMES_HOME=None,
+                HERMES_PROFILE=None,
+                DREAMS_HERMES_ROOT=None,
+            ), patch.dict(sys.modules, {"hermes_constants": host}):
+                self.assertEqual(bridge._hermes_root(), root)
+                self.assertEqual(bridge._plugin_cli(), cli)
+                self.assertEqual(bridge.pick_profile([]), "tester")
+
+    def test_profile_name_resolution_rejects_traversal(self) -> None:
+        bridge = _load_bridge()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            profiles = self._profiles(home, "valid")
+            with _env(
+                HOME=str(home),
+                HERMES_HOME=str(profiles / "valid"),
+                HERMES_PROFILE=None,
+            ):
+                self.assertEqual(bridge._existing_profile("../.."), "")
+
+    def test_invalid_profile_environment_does_not_fall_back_to_recent_profile(self) -> None:
+        bridge = _load_bridge()
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            profiles = self._profiles(home, "recent")
+            (profiles / "recent" / "state.db").write_text("", encoding="utf-8")
+            with _env(
+                HOME=str(home),
+                HERMES_HOME=str(home / "not-a-profile"),
+                HERMES_SESSION_PROFILE=None,
+                HERMES_PROFILE="does-not-exist",
+            ):
+                with self.assertRaisesRegex(SystemExit, "does-not-exist"):
+                    bridge.pick_profile([])
 
     def test_newest_state_db_is_the_last_resort(self) -> None:
         bridge = _load_bridge()

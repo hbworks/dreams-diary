@@ -79,6 +79,25 @@ class RenderTests(unittest.TestCase):
 
 
 class CheckTests(unittest.TestCase):
+    def test_missing_only_profile_fails_check_and_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles"
+            path = root / "alpha" / "cron" / "jobs.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps({"jobs": [{"id": "other", "script": "other.py"}]}),
+                encoding="utf-8",
+            )
+            result = core.check_cron_prompt(profiles_root=root)
+            out = io.StringIO()
+            with patch.dict(os.environ, {"DREAMS_PROFILES_ROOT": str(root)}), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = cli_mod.main(["prompt", "--check"])
+        self.assertEqual(result["missing_profiles"], ["alpha"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(code, 1)
+        self.assertFalse(json.loads(out.getvalue())["ok"])
+
     def test_reports_same_and_diff(self):
         rendered = core.render_cron_prompt()
         with tempfile.TemporaryDirectory() as tmp:

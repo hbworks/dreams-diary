@@ -12,39 +12,36 @@ Manual use is supported too:
     python3 dreams_diary_validate.py --profile buddy
     python3 dreams_diary_material.py 2026-10-22     # 素材を stdout へ
 
-プロファイル未指定なら、``HERMES_HOME``（cron / 内蔵ターミナル）、``HERMES_SESSION_PROFILE``、
-Hermes Desktop の ``active-profile.json``、最後に更新された ``state.db`` の順で解決する。
+プロファイル未指定なら、``HERMES_HOME``（cron / 内蔵ターミナル）、Hermes の context-local home、
+``HERMES_SESSION_PROFILE``、Hermes Desktop の ``active-profile.json``、最後に更新された ``state.db`` の順で解決する。
 日付未指定の validate は「今日」と「昨日」のうち最新の日記ファイルを対象にする。
 """
 
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import json
 import os
 import re
 import runpy
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
+
+_PATH_HELPER = Path(__file__).resolve().with_name("dreams_diary_paths.py")
+if not _PATH_HELPER.is_file():
+    raise SystemExit(f"Dreams Diary path helper is missing: {_PATH_HELPER}")
+_PATH_SPEC = importlib.util.spec_from_file_location("_dreams_diary_paths", _PATH_HELPER)
+if _PATH_SPEC is None or _PATH_SPEC.loader is None:
+    raise ImportError(f"Dreams Diary path helper is missing: {_PATH_HELPER}")
+_PATH_MODULE = importlib.util.module_from_spec(_PATH_SPEC)
+_PATH_SPEC.loader.exec_module(_PATH_MODULE)
+_context_home = _PATH_MODULE.context_home
+_hermes_root = _PATH_MODULE.hermes_root
+_profile_home = _PATH_MODULE.profile_home
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-DIARY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(-\d+)?\.md$")
-
-
-def _hermes_root() -> Path:
-    """`~/.hermes` に相当する root。標準レイアウト（<root> か <root>/profiles/<name>）を前提にする。"""
-    override = os.environ.get("DREAMS_HERMES_ROOT", "").strip()
-    if override:
-        return Path(os.path.expanduser(override))
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    if hermes_home:
-        home = Path(os.path.expanduser(hermes_home))
-        if home.parent.name == "profiles":
-            return home.parent.parent
-        if (home / "profiles").is_dir() or home.name.startswith("."):
-            return home
-    return Path.home() / ".hermes"
 
 
 def _plugin_cli() -> Path:
@@ -53,9 +50,17 @@ def _plugin_cli() -> Path:
     hermes_home = os.environ.get("HERMES_HOME", "").strip()
     if hermes_home:
         candidates.append(Path(hermes_home).expanduser() / "plugins" / "dreams-diary" / "cli.py")
+    context_home = _context_home()
+    if context_home is not None:
+        candidates.append(context_home / "plugins" / "dreams-diary" / "cli.py")
     profile = os.environ.get("HERMES_PROFILE", "").strip()
     if profile:
-        candidates.append(root / "profiles" / profile / "plugins" / "dreams-diary" / "cli.py")
+        try:
+            profile_home = _profile_home(root, profile)
+        except ValueError:
+            profile_home = None
+        if profile_home is not None:
+            candidates.append(profile_home / "plugins" / "dreams-diary" / "cli.py")
     candidates.append(root / "plugins" / "dreams-diary" / "cli.py")
     for candidate in candidates:
         if candidate.is_file():
@@ -66,13 +71,35 @@ def _plugin_cli() -> Path:
     )
 
 
+def _plugin_core(cli: Path) -> dict:
+    """CLI と同じインストール先の core を読み込む。"""
+    path = cli.parent / "main.py"
+    if not path.is_file():
+        raise SystemExit(f"Dreams Diary core not found next to CLI: {path}")
+    plugin_root = str(cli.parent)
+    added_path = plugin_root not in sys.path
+    if added_path:
+        sys.path.insert(0, plugin_root)
+    try:
+        return runpy.run_path(str(path), run_name="dreams_diary_core")
+    finally:
+        if added_path:
+            sys.path.remove(plugin_root)
+
+
 def _profiles_root() -> Path:
     return _hermes_root() / "profiles"
 
 
 def _existing_profile(name: str) -> str:
     name = (name or "").strip()
-    return name if name and (_profiles_root() / name).is_dir() else ""
+    if not name:
+        return ""
+    try:
+        _profile_home(_hermes_root(), name)
+    except ValueError:
+        return ""
+    return name
 
 
 def _profile_from_home(raw: str) -> str:
@@ -113,6 +140,8 @@ def _most_recent_profile() -> str:
     except OSError:
         return ""
     for entry in entries:
+        if not _existing_profile(entry.name):
+            continue
         try:
             mtime = (entry / "state.db").stat().st_mtime
         except OSError:
@@ -128,35 +157,26 @@ def pick_profile(argv: List[str]) -> str:
         if arg in ("-p", "--profile") or arg.startswith("--profile="):
             return ""
     name = _profile_from_home(os.environ.get("HERMES_HOME", ""))
-    name = name or _existing_profile(os.environ.get("HERMES_SESSION_PROFILE", ""))
-    name = name or _desktop_active_profile()
-    name = name or _existing_profile(os.environ.get("HERMES_PROFILE", ""))
-    return name or _most_recent_profile()
-
-
-def newest_diary(home: Optional[Path], today: Optional[datetime.date] = None) -> Optional[Path]:
-    """「今日」と「昨日」の日記のうち、いちばん新しい1本（-2 / -3 も含む）。"""
-    if home is None:
-        return None
-    day = today or datetime.date.today()
-    window = {
-        day.isoformat(),
-        (day - datetime.timedelta(days=1)).isoformat(),
-    }
-    best: Optional[Tuple[Tuple[str, int], Path]] = None
-    try:
-        entries = list((home / "dreams").iterdir())
-    except OSError:
-        return None
-    for entry in entries:
-        match = DIARY_RE.match(entry.name)
-        if not match or match.group(1) not in window:
-            continue
-        variant = int(match.group(2)[1:]) if match.group(2) else 0
-        key = (match.group(1), variant)
-        if best is None or key > best[0]:
-            best = (key, entry)
-    return best[1] if best else None
+    context = _context_home()
+    name = name or (_profile_from_home(str(context)) if context is not None else "")
+    if name:
+        return name
+    session_profile = os.environ.get("HERMES_SESSION_PROFILE", "").strip()
+    if session_profile:
+        name = _existing_profile(session_profile)
+        if not name:
+            raise SystemExit(f"指定されたプロファイルが存在しません: {session_profile}")
+        return name
+    name = _desktop_active_profile()
+    if name:
+        return name
+    profile = os.environ.get("HERMES_PROFILE", "").strip()
+    if profile:
+        name = _existing_profile(profile)
+        if not name:
+            raise SystemExit(f"指定されたプロファイルが存在しません: {profile}")
+        return name
+    return _most_recent_profile()
 
 
 def _has_day_or_path(argv: List[str]) -> bool:
@@ -174,7 +194,8 @@ def run(command: str = "material") -> None:
         args.extend(["--profile", profile])
     if command == "validate" and not _has_day_or_path(args):
         home = _profiles_root() / profile if profile else None
-        target = newest_diary(home)
+        core = _plugin_core(cli)
+        target = core["newest_diary"](home)
         if target is not None:
             args.extend(["--path", str(target)])
         else:

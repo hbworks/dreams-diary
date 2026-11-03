@@ -11,7 +11,7 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 
 | Tool | Purpose |
 | :--- | :--- |
-| `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file always holds the full text, even when the returned pack is capped by `max_chars`. |
+| `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file holds the full text, and a successful text response (including its locator or truncation notice) stays within `max_chars`. A budget too small for the notice returns an error. |
 | `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). |
 | `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports the prose char count (frontmatter and headings excluded; warns under 800 / over 3000), and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
 | `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
@@ -65,7 +65,7 @@ cd /path/to/dreams-diary
 PROFILE=<name>
 PROFILE_HOME="${HERMES_PROFILE_HOME:-$HOME/.hermes/profiles/$PROFILE}"
 mkdir -p "$PROFILE_HOME/scripts"
-cp scripts/dreams_diary_material.py scripts/dreams_diary_validate.py "$PROFILE_HOME/scripts/"
+cp scripts/dreams_diary_material.py scripts/dreams_diary_validate.py scripts/dreams_diary_paths.py "$PROFILE_HOME/scripts/"
 hermes -p "$PROFILE" plugins enable dreams-diary
 hermes -p "$PROFILE" cron create "30 23 * * *" \
   --name dreams-diary \
@@ -108,8 +108,13 @@ Every CLI command accepts `--profile <name>` (or `-p`). Without it, the CLI reso
 from Hermes' context-local override, then `HERMES_HOME`, then `HERMES_PROFILE`, and only then the
 root's `active_profile` — a global pointer to whichever profile was last used. The root is
 `~/.hermes` unless `HERMES_HOME` (a profile home) or `DREAMS_HERMES_ROOT` says otherwise. When it
-has to fall back to `active_profile` or the bare root, it prints a warning naming the home it
-picked, so a stray shell invocation cannot silently read or write another agent's diary:
+has to fall back to `active_profile`, the bare root, or any home that is not an existing profile
+directory, it prints a warning naming the home it picked, so a stray shell invocation cannot silently
+read or write another agent's diary:
+
+A supplied `--profile` is strict: it must name an existing directory directly under `profiles/`.
+Missing names and path traversal are errors; they never fall through to `HERMES_HOME` or another
+profile. The CLI and profile-local bridge share the same Hermes-root resolver.
 
 ```sh
 $ env -u HERMES_HOME python3 cli.py material 2026-11-01
@@ -119,8 +124,9 @@ $ env -u HERMES_HOME python3 cli.py material 2026-11-01
 `dreams_index` / `cli.py index` never fails on a single bad file: unreadable diaries are skipped,
 reported in `skipped`, and listed in `INDEX.md` under 読めなかった日記 so the gap stays visible.
 夜間ジョブの最後の手順が `dreams_index` を呼ぶので、目次は日記より1日遅れない。ツールは引数を取らず、
-登録済み home に書くが、その home が root（`~/.hermes`）に解決された場合は書かずにエラーを返す
-（cron worker の home ずれ対策）。遅れているプロファイルは
+登録済み home に書くが、その home がプロファイルではなく root（`~/.hermes`）や不明な場所に解決された場合は
+書かずにエラーを返す（cron worker の home ずれ対策）。同じ guard は素材保存と雛形作成にも適用される。
+遅れているプロファイルは
 `python3 cli.py --profile <name> index` で1コマンドで作り直せる。
 
 ### Late gate (cron has no post-run hook)
@@ -157,7 +163,7 @@ python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py --profile b
 ```
 
 Without `--profile`, the bridge resolves the profile in this order: `HERMES_HOME` (set by cron
-and the in-app terminal) → `HERMES_SESSION_PROFILE` → Hermes Desktop's
+and the in-app terminal) → Hermes' context-local home → `HERMES_SESSION_PROFILE` → Hermes Desktop's
 `~/Library/Application Support/Hermes/active-profile.json` → `HERMES_PROFILE` → the profile with
 the most recently written `state.db`. The legacy `~/.hermes/active_profile` pointer is **not**
 used here: on this machine it still said `assistant` months after the switch to `research`.
@@ -189,7 +195,7 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
 
 - `missing_frontmatter` / `missing_frontmatter_field` (error) — requires a delimited frontmatter block with `date`, `author`, `sessions`, `messages`, and `commit`.
 - `invalid_frontmatter_date` / `frontmatter_date_mismatch` (error) — `date` must be a real `YYYY-MM-DD` date matching the diary filename.
-- `invalid_frontmatter_field` (error) — `author` must be non-empty, `sessions` and `messages` must be non-negative integers, and `commit` must contain a value or a list.
+- `invalid_frontmatter_field` (error) — `author` must be non-empty, `sessions` and `messages` must be non-negative integers, and `commit` must be a non-empty scalar or list. Hash-shaped tokens in quoted, comma-separated, or block-list commit values are verified too.
 - `missing_section` (error) — one of the six headings is absent.
 - `second_person` (error) — `あなた` appears. Refer to the human as `ユーザー`, quote or report
   what they said (`「〜と言っていた」`), never assert their inner state.
@@ -201,8 +207,11 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
   explicitly when a repo lives outside that tree. This catches the most common LLM failure in
   this format: a hash whose
   date and time are right but whose digits were invented.
-- `unverified_external_hash` (warn) — an upstream commit (e.g. `origin/main`) that cannot be
-  verified locally.
+- `unverified_external_hash` (warn) — an explicitly paired remote ref and hash (e.g.
+  `` `origin/main` の `abc1234` `` or `` `origin/main` を `abc1234` ``), an explicitly labeled
+  upstream/GitHub/external commit, or a GitHub commit URL that cannot be verified locally. Words
+  such as `github.com`, `upstream`, or `外部` elsewhere on the same line do not downgrade a local
+  commit-context hash from `unresolved_hash`.
 
 Hex that merely *looks* like a hash — Docker hostnames, cron job ids, run ids, session ids,
 game error codes — is ignored unless the surrounding line is about a commit.
@@ -213,8 +222,8 @@ game error codes — is ignored unless the surrounding line is about a commit.
 python3 -m unittest discover -s tests
 ```
 
-47 tests, standard library only. They build a throwaway profile (state.db, memory.db) and a
-throwaway git repo, so nothing touches real data.
+The standard-library tests build throwaway profiles (`state.db`, `memory.db`) and a throwaway
+git repo, so nothing touches real data.
 
 ---
 
@@ -231,9 +240,9 @@ throwaway git repo, so nothing touches real data.
 
 cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` 配下に解決されます。
 `plugins/` 内の `cli.py` を直接指定する絶対パスは拒否されるため、
-`scripts/dreams_diary_material.py` を各プロフィールの `scripts/` にコピーして、相対名で登録してください。
+`scripts/dreams_diary_material.py` と `scripts/dreams_diary_paths.py` を各プロフィールの `scripts/` にコピーして、相対名で登録してください。
 手動検査用の `scripts/dreams_diary_validate.py` も同じ場所にコピーします（実装は material 側の
-`run()` を共有する薄いシムなので、2ファイルを必ず一緒に更新する）。
+`run()` を共有する薄いシムです。bridge 2本と共有パス helper の3ファイルを一緒に更新してください。
 このブリッジは共有プラグインの `cli.py material` を呼び出し、実装を重複させません。
 
 共通 cron プロンプトは `templates/cron-prompt.md`、任意の声の記入用ひな形は
@@ -253,6 +262,8 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 （最後に触ったプロファイルを指す共通ポインタ）です。`active_profile` や `~/.hermes` 直下に
 落ちたときは、選んだ home を名指しして警告を出します。`cli.py index` は読めない日記が1本あっても
 全体を落とさず、`skipped` と INDEX の「読めなかった日記」に残します。
+`--profile` は `profiles/` 直下に実在するディレクトリだけを受け付け、存在しない名前や `..` などの
+パス移動はエラーにします。指定を捨てて別プロファイルへフォールバックすることはありません。
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。`--path FILE` で日記ファイルを
 直接指定できます（`-2` / `-3` の別名ファイルを検査するときに必要）。
 
@@ -264,7 +275,7 @@ python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py 2026-08-22 
 python3 ~/.hermes/profiles/research/scripts/dreams_diary_validate.py --profile buddy
 ```
 
-プロファイル未指定時の解決順は `HERMES_HOME` → `HERMES_SESSION_PROFILE` →
+プロファイル未指定時の解決順は `HERMES_HOME` → Hermes の context-local home → `HERMES_SESSION_PROFILE` →
 Hermes Desktop の `active-profile.json` → `HERMES_PROFILE` → 最後に `state.db` が更新された
 プロファイル。`~/.hermes/active_profile` は使わない（実機では `assistant` のまま古い）。
 日付未指定なら「今日」と「昨日」のうち最新の日記（`-2` / `-3` 含む）をパス指定で検査するので、

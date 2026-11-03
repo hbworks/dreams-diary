@@ -23,6 +23,15 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from .scripts.dreams_diary_paths import hermes_root as _hermes_root
+    from .scripts.dreams_diary_paths import profile_home as _profile_home
+    from .scripts.dreams_diary_paths import root_from_home as _root_from_home
+except ImportError:  # CLI and tests import main as a top-level module
+    from scripts.dreams_diary_paths import hermes_root as _hermes_root
+    from scripts.dreams_diary_paths import profile_home as _profile_home
+    from scripts.dreams_diary_paths import root_from_home as _root_from_home
+
 SECTIONS = (
     "## 今日、何を見ていたか",
     "## 考えたこと",
@@ -43,6 +52,14 @@ MIN_CHARS_SOFT = 800
 # `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
 DIARY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
 
+
+def _diary_sort_key(path: Path) -> Tuple[str, int]:
+    match = DIARY_NAME.match(path.name)
+    if match is None:
+        return "", -1
+    return match.group(1), int(match.group(2) or 0)
+
+
 # 素材の切り詰め配分。会話から削り、根拠（コミット・memory）に最低限の枠を残す。
 TRUNC_MIN_AVAILABLE = 100
 EVIDENCE_SHARE = 0.4
@@ -51,47 +68,6 @@ MEMORY_CEILING = 400
 
 
 # ---------------------------------------------------------------- profile paths
-
-
-def _root_from_home(home: Path) -> Optional[Path]:
-    """home が root か、プロファイル home かを見分けて root を返す。判定できなければ None。"""
-    if home.parent.name == "profiles":
-        return home.parent.parent
-    if (home / "profiles").is_dir() or home.name.startswith("."):
-        return home
-    return None
-
-
-def _hermes_root() -> Path:
-    """`~/.hermes` に相当する root。`HERMES_HOME` がプロファイル home を指すならその親の親。
-
-    標準レイアウト（`<root>` または `<root>/profiles/<name>`）を前提に root を取り出す。
-    別レイアウトは `DREAMS_HERMES_ROOT` で明示する。`~/.hermes` を直書きすると、
-    hermes の home を別の場所に置いた環境で `--profile` が誤った場所を指し、同名の
-    別プロファイルを黙って読み書きしてしまう。
-    """
-    override = os.environ.get("DREAMS_HERMES_ROOT", "").strip()
-    if override:
-        return Path(os.path.expanduser(override))
-
-    candidates: List[Path] = []
-    env = os.environ.get("HERMES_HOME", "").strip()
-    if env:
-        candidates.append(Path(os.path.expanduser(env)))
-    try:  # ホストから呼ばれたときは、その home が最も確実
-        import hermes_constants as hc
-
-        get_home = getattr(hc, "get_hermes_home", None)
-        if callable(get_home):
-            candidates.append(Path(get_home()).expanduser())
-    except Exception:  # noqa: BLE001 - ホスト外（CLI 単体）では import できない
-        pass
-
-    for candidate in candidates:
-        root = _root_from_home(candidate)
-        if root is not None:
-            return root
-    return Path(os.path.expanduser("~/.hermes"))
 
 
 def resolve_profile_home(profile: Optional[str] = None) -> Path:
@@ -106,14 +82,15 @@ def resolve_profile_home_source(profile: Optional[str] = None) -> Tuple[Path, st
     env（HERMES_HOME）→ profile_env（HERMES_PROFILE）→ active_profile（root の共通ポインタ）
     → root。root は `_hermes_root()` が返す（既定は `~/.hermes`）。
 
+    明示 profile は既存の profiles 直下ディレクトリだけを受け付け、不正名や不在時は
+    例外にして他の解決経路へフォールバックしない。
+
     active_profile / root は「たまたま最後に触ったプロファイル」を指しうる。黙って
     そこへ書くと別プロファイルの記憶や日記を壊すため、呼び出し側が警告できるよう
     経路も返す。
     """
-    if profile and str(profile).strip():
-        p = _hermes_root() / "profiles" / str(profile).strip()
-        if p.exists():
-            return p, "explicit"
+    if profile is not None:
+        return _profile_home(_hermes_root(), str(profile)), "explicit"
     try:
         import hermes_constants as hc
     except ImportError:
@@ -131,18 +108,17 @@ def resolve_profile_home_source(profile: Optional[str] = None) -> Tuple[Path, st
         return Path(os.path.expanduser(env)), "env"
     prof = os.environ.get("HERMES_PROFILE", "").strip()
     if prof:
-        p = _hermes_root() / "profiles" / prof
-        if p.exists():
-            return p, "profile_env"
+        return _profile_home(_hermes_root(), prof), "profile_env"
     try:
         root = _hermes_root()
         active = root / "active_profile"
         if active.exists():
             name = active.read_text(encoding="utf-8").strip()
             if name:
-                p = root / "profiles" / name
-                if p.exists():
-                    return p, "active_profile"
+                try:
+                    return _profile_home(root, name), "active_profile"
+                except ValueError:
+                    pass
     except OSError:
         pass
     return _hermes_root(), "root"
@@ -180,8 +156,14 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _fit(text: str, budget: int, notice: str) -> str:
-    """予算に収まらなければ切り詰め、切ったことを明示する（黙って欠落させない）。"""
-    return text if len(text) <= budget else text[:budget] + notice
+    """notice を含めて、指定予算を超えずに切り詰める。"""
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    if len(notice) > budget:
+        return text[:budget]
+    return text[: budget - len(notice)] + notice
 
 
 def _day_bounds(day: str) -> Tuple[float, float]:
@@ -197,19 +179,30 @@ def _sessions_material(day: str, home: Path) -> str:
     if not db.exists():
         return "（state.db が見つからない）\n"
     t0, t1 = _day_bounds(day)
-    try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
-        con.row_factory = sqlite3.Row
-        rows = con.execute(
-            """select session_id, role, content, tool_name, timestamp
-               from messages
-               where timestamp >= ? and timestamp < ?
-               order by timestamp""",
-            (t0, t1),
-        ).fetchall()
-        con.close()
-    except sqlite3.Error as exc:
-        return f"（会話の取得に失敗: {exc}）\n"
+    rows = None
+    err: Optional[Exception] = None
+    for uri, kw in ((f"file:{db}?mode=ro", {"uri": True}), (str(db), {})):
+        con = None
+        try:
+            con = sqlite3.connect(uri, timeout=10, **kw)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """select session_id, role, content, tool_name, timestamp
+                   from messages
+                   where timestamp >= ? and timestamp < ?
+                   order by timestamp""",
+                (t0, t1),
+            ).fetchall()
+            err = None
+            break
+        except sqlite3.Error as exc:
+            err = exc
+            rows = None
+        finally:
+            if con is not None:
+                con.close()
+    if rows is None:
+        return f"（会話の取得に失敗: {err}）\n"
     if not rows:
         return "（この日の会話は無い）\n"
 
@@ -360,8 +353,28 @@ def _previous_diary(day: str, home: Path) -> Optional[Path]:
     for f in ddir.iterdir():
         match = DIARY_NAME.match(f.name)
         if match and match.group(1) < day:
-            candidates.append(((match.group(1), int(match.group(2) or 0)), f))
+            candidates.append((_diary_sort_key(f), f))
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def newest_diary(
+    home: Optional[Path], current_day: Optional[datetime.date] = None
+) -> Optional[Path]:
+    """今日・昨日の窓から、数値の変種番号で最も新しい日記を返す。"""
+    if home is None:
+        return None
+    day = current_day or datetime.date.today()
+    window = {day.isoformat(), (day - datetime.timedelta(days=1)).isoformat()}
+    try:
+        entries = list((home / "dreams").iterdir())
+    except OSError:
+        return None
+    candidates = [
+        entry
+        for entry in entries
+        if (match := DIARY_NAME.match(entry.name)) and match.group(1) in window
+    ]
+    return max(candidates, key=_diary_sort_key) if candidates else None
 
 
 def _gate_material(day: str, home: Path, repos: Optional[List[Path]] = None) -> str:
@@ -390,9 +403,13 @@ def collect_material(
     home: Optional[Path] = None,
     max_chars: int = DEFAULT_MAX_MATERIAL,
     repos: Optional[List[Path]] = None,
+    include_material_path: bool = False,
 ) -> Dict[str, Any]:
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 0:
+        raise ValueError(f"max_chars は 0 以上の整数で指定してください（受領: {max_chars!r}）")
     day = _valid_date(day)
     home = home or resolve_profile_home()
+    _require_profile_home(home)
     ddir = home / "dreams"
     diary = ddir / f"{day}.md"
     header = (
@@ -415,6 +432,17 @@ def collect_material(
     # 全文は必ず _material 側へ保存する。ここを切り詰めると「全文はそちらを見る」
     # という案内が嘘になり、根拠の再確認ができなくなる。
     material_path = ddir / "_material" / f"{day}.md"
+    expected_path_footer = (
+        f"\n\n（素材ファイル: {material_path}）" if include_material_path else ""
+    )
+    if len(body_full) + len(expected_path_footer) > max_chars:
+        expected_notice = (
+            f"\n\n（素材は上限 {max_chars} 字に合わせて切り詰めた。全文: {material_path}）"
+        )
+        if len(expected_notice) > max_chars:
+            raise ValueError(
+                f"max_chars は切り詰め注記を含めるため {len(expected_notice)} 字以上が必要です"
+            )
     material_saved = True
     try:
         material_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,22 +450,42 @@ def collect_material(
     except OSError:
         material_saved = False
 
-    truncated = len(body_full) > max_chars
+    path_footer = ""
+    if include_material_path:
+        path_footer = (
+            f"\n\n（素材ファイル: {material_path}）"
+            if material_saved
+            else "\n\n（素材ファイルへの保存に失敗しました）"
+        )
+    truncated = len(body_full) + len(path_footer) > max_chars
     body = body_full
     if truncated:
+        if material_saved:
+            notice_text = f"素材は上限 {max_chars} 字に合わせて切り詰めた。全文: {material_path}"
+        else:
+            notice_text = f"素材は上限 {max_chars} 字に合わせて切り詰めた。全文の保存に失敗した"
+        notice = f"\n\n（{notice_text}）"
+        if len(notice) > max_chars:
+            raise ValueError(
+                f"max_chars は切り詰め注記を含めるため {len(notice)} 字以上が必要です"
+            )
+        content_budget = max_chars - len(notice)
         conv_head = "## 会話\n"
         commit_head = "\n## コミット\n"
         mem_head = "\n## この日 memory に追加された項目\n"
         fixed = len(header) + len(conv_head) + len(commit_head) + len(mem_head)
-        note = f"（素材は上限 {max_chars} 字に合わせて切り詰めた。全文: {material_path}）\n"
-        available = max_chars - fixed - len(note)
+        available = content_budget - fixed
         if available < TRUNC_MIN_AVAILABLE:
-            body = body_full[: max(0, max_chars)] + "\n（素材は上限で切り詰めた）\n"
+            body = body_full[:content_budget] + notice
         else:
             # 根拠（コミット・memory）に最低限の枠を確保してから、残りを会話に回す。
             # 会話が長い日に根拠節ごと消えると、日記の裏付けが失われる。
             ev_body = len(commits) + len(memory)
-            ev_budget = min(ev_body, max(EVIDENCE_FLOOR, int(available * EVIDENCE_SHARE)))
+            ev_budget = min(
+                ev_body,
+                available,
+                max(EVIDENCE_FLOOR, int(available * EVIDENCE_SHARE)),
+            )
             mem_budget = min(len(memory), max(0, min(MEMORY_CEILING, ev_budget)))
             commit_budget = max(0, ev_budget - mem_budget)
             conv_budget = max(0, available - ev_budget)
@@ -449,8 +497,10 @@ def collect_material(
                 + _fit(commits, commit_budget, "\n（コミットは上限で切り詰めた）\n")
                 + mem_head
                 + _fit(memory, mem_budget, "\n")
-                + note
+                + notice
             )
+    else:
+        body += path_footer
     return {
         "date": day,
         "profile_home": str(home),
@@ -469,10 +519,26 @@ def collect_material(
 
 
 def is_root_home(home: Optional[Path] = None) -> bool:
-    """プロファイルの home ではなく root（`~/.hermes`）を指しているか。"""
-    target = home or resolve_profile_home()
-    name = target.name.strip()
-    return not name or name.startswith(".")
+    """profiles 直下に実在するプロファイル以外（root・不明な home）を True とする。"""
+    target = Path(home or resolve_profile_home()).expanduser()
+    try:
+        target = target.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return True
+    root = _root_from_home(target)
+    if root is None:
+        return True
+    try:
+        root = root.resolve()
+        profiles_root = (root / "profiles").resolve()
+    except (OSError, RuntimeError):
+        return True
+    return target == root or target.parent != profiles_root or not target.is_dir()
+
+
+def _require_profile_home(home: Path) -> None:
+    if is_root_home(home):
+        raise ValueError(f"プロファイル home を特定できないため書き込みを拒否します: {home}")
 
 
 def _author_name(home: Path) -> str:
@@ -495,8 +561,11 @@ def write_skeleton(
     sessions / messages は素材で観測した実測値を渡す。省略時は空欄のまま残し、
     エージェントが素材から転記する（推測で 0 を埋めない）。
     """
+    if not isinstance(force, bool):
+        raise ValueError(f"force は boolean で指定してください（受領: {force!r}）")
     day = _valid_date(day)
     home = home or resolve_profile_home()
+    _require_profile_home(home)
     ddir = home / "dreams"
     ddir.mkdir(parents=True, exist_ok=True)
     path = ddir / f"{day}.md"
@@ -552,11 +621,22 @@ def write_skeleton(
 
 
 HEX_IN_TICKS = re.compile(r"`([0-9a-f]{7,40})`")
+COMMIT_HASH_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[0-9a-f]{7,40}(?![A-Za-z0-9_])")
 COMMIT_CONTEXT = re.compile(
     r"(commit|コミット|\((?:fix|feat|docs|chore|test|refactor|perf|style|build|ci)\()"
 )
-EXTERNAL_CONTEXT = re.compile(
-    r"(origin/|upstream|GitHub|github\.com|外部|リモート|hermes-agent の)"
+REMOTE_HASH_PAIR = re.compile(
+    r"`(?:origin|upstream)/[^`\s]+`[ \t]*(?:の[ \t]*|を[ \t]*|[:=][ \t]*)`([0-9a-f]{7,40})`"
+    r"|`([0-9a-f]{7,40})`[ \t]*(?:の[ \t]*|を[ \t]*|[:=][ \t]*)`(?:origin|upstream)/[^`\s]+`",
+    re.IGNORECASE,
+)
+EXTERNAL_COMMIT_LABEL = re.compile(
+    r"(?:upstream|github(?:\.com)?|外部|リモート)[ \t]*(?:commit|コミット)[ \t]*[:：]?[ \t]*`([0-9a-f]{7,40})`",
+    re.IGNORECASE,
+)
+GITHUB_COMMIT_URL = re.compile(
+    r"https?://github\.com/[^/\s]+/[^/\s]+/(?:commit|commits)/([0-9a-f]{7,40})(?:[/?#\s)]|$)",
+    re.IGNORECASE,
 )
 
 
@@ -581,6 +661,33 @@ def _frontmatter_fields(text: str) -> Dict[str, str]:
     return fields
 
 
+def _unquote_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1].strip()
+    return value
+
+
+def _frontmatter_commit_values(text: str) -> List[str]:
+    """commit の scalar または block-list 値を frontmatter から取り出す。"""
+    values: List[str] = []
+    in_commit_list = False
+    for line in _frontmatter_lines(text) or []:
+        field = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$", line)
+        if field:
+            key = field.group(1)
+            value = (field.group(2) or "").strip()
+            in_commit_list = key == "commit" and not value
+            if key == "commit" and value:
+                values.append(value)
+            continue
+        if in_commit_list:
+            item = re.match(r"^\s+-\s*(.*?)\s*$", line)
+            if item:
+                values.append(item.group(1))
+    return values
+
+
 def _prose_chars(text: str) -> int:
     """本文だけの字数。frontmatter と見出し行を除き、空白も数えない。
 
@@ -603,16 +710,37 @@ def _commit_candidates(text: str) -> List[str]:
     Docker のホスト名、cron のジョブID、run ID、日付、ゲームのエラーコードも
     16進に見えるため、文脈なしに拾うと誤検知だらけになる。
     """
-    found: List[str] = []
+    return [h for h, _ in _commit_references(text)]
+
+
+def _commit_references(text: str) -> List[Tuple[str, bool]]:
+    """候補ハッシュと、明示的な外部参照かどうかを返す。"""
+    found: List[Tuple[str, bool]] = []
+    for raw_value in _frontmatter_commit_values(text):
+        value = _unquote_scalar(raw_value)
+        found.extend((h, False) for h in COMMIT_HASH_TOKEN.findall(value))
+
     for line in text.splitlines():
-        m = re.match(r"^commit:\s*([0-9a-f]{7,40})\s*$", line.strip())
-        if m:
-            found.append(m.group(1))
-            continue
-        if not (COMMIT_CONTEXT.search(line) or EXTERNAL_CONTEXT.search(line)):
-            continue
-        found.extend(HEX_IN_TICKS.findall(line))
-    return [h for h in found if re.search(r"[a-f]", h)]
+        tick_hashes = HEX_IN_TICKS.findall(line)
+        paired_hashes = {
+            (match.group(1) or match.group(2)).lower()
+            for match in REMOTE_HASH_PAIR.finditer(line)
+        }
+        labeled_hashes = {
+            match.group(1).lower() for match in EXTERNAL_COMMIT_LABEL.finditer(line)
+        }
+        github_hashes = {match.group(1).lower() for match in GITHUB_COMMIT_URL.finditer(line)}
+        commit_context = COMMIT_CONTEXT.search(line) is not None
+        if commit_context:
+            found.extend(
+                (h, h in paired_hashes or h in labeled_hashes or h in github_hashes)
+                for h in tick_hashes
+                if re.search(r"[a-f]", h)
+            )
+        else:
+            found.extend((h, True) for h in paired_hashes | labeled_hashes)
+        found.extend((h, True) for h in github_hashes)
+    return found
 
 
 def _resolve_hash(h: str, repos: List[Path]) -> Optional[str]:
@@ -646,10 +774,7 @@ def _frontmatter_issues(text: str, target: Path) -> List[Dict[str, str]]:
         return [_issue("error", "missing_frontmatter_field", "必須フィールドがない: " + ", ".join(missing))]
 
     def scalar(key: str) -> str:
-        value = fields[key].strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1].strip()
-        return value
+        return _unquote_scalar(fields[key])
 
     issues: List[Dict[str, str]] = []
     raw_date = scalar("date")
@@ -674,8 +799,8 @@ def _frontmatter_issues(text: str, target: Path) -> List[Dict[str, str]]:
     invalid.extend(
         key for key in ("sessions", "messages") if scalar(key) and not re.fullmatch(r"\d+", scalar(key))
     )
-    has_commit_list = any(re.match(r"^\s+-\s+\S", line) for line in lines)
-    if not scalar("commit") and not has_commit_list:
+    commit_values = _frontmatter_commit_values(text)
+    if not scalar("commit") and not any(_unquote_scalar(value) for value in commit_values):
         invalid.append("commit")
     if invalid:
         issues.append(
@@ -707,11 +832,13 @@ def _hash_issues(text: str, repos: List[Path]) -> List[Dict[str, str]]:
     """コミット文脈のハッシュがローカルに実在するか。外部ハッシュは warn に留める。"""
     unresolved: List[str] = []
     external: List[str] = []
-    for h in sorted(set(_commit_candidates(text))):
+    references: Dict[str, List[bool]] = collections.defaultdict(list)
+    for h, is_external in _commit_references(text):
+        references[h].append(is_external)
+    for h in sorted(references):
         if _resolve_hash(h, repos) is not None:
             continue
-        line = next((ln for ln in text.splitlines() if h in ln), "")
-        (external if EXTERNAL_CONTEXT.search(line) else unresolved).append(h)
+        (external if all(references[h]) else unresolved).append(h)
 
     issues = [
         _issue(
@@ -778,6 +905,7 @@ def audit_diaries(
     if ddir.is_dir():
         files = sorted(
             (f for f in ddir.iterdir() if DIARY_NAME.match(f.name)),
+            key=_diary_sort_key,
             reverse=True,
         )[:limit]
         repos = repos if repos is not None else discover_repos()
@@ -806,6 +934,13 @@ def audit_diaries(
 def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
     home = home or resolve_profile_home()
     ddir = home / "dreams"
+    if is_root_home(home):
+        return {
+            "ok": False,
+            "count": 0,
+            "path": str(ddir / "INDEX.md"),
+            "error": f"プロファイル home を特定できないため書き込みを拒否します: {home}",
+        }
     if not ddir.exists():
         return {"ok": False, "count": 0, "path": str(ddir / "INDEX.md")}
 
@@ -827,16 +962,17 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
         fields = _frontmatter_fields(text)
         rows.append(
             (
+                _diary_sort_key(f),
                 f.stem,
                 fields.get("sessions", "").strip('"'),
                 fields.get("messages", "").strip('"'),
                 tail(text),
             )
         )
-    rows.sort(reverse=True)
+    rows.sort(key=lambda row: row[0], reverse=True)
 
     out = ["# 夢日記 目次\n", f"全 {len(rows)} 本。各日の末尾の申し送りだけ抜粋。\n"]
-    for date, s, m, t in rows:
+    for _, date, s, m, t in rows:
         out.append(f"\n## [{date}]({date}.md)")
         meta = [x for x in (f"セッション {s}" if s else "", f"メッセージ {m}" if m else "") if x]
         if meta:
@@ -963,7 +1099,7 @@ def check_cron_prompt(
                 }
             )
     return {
-        "ok": not unreadable and all(row["state"] == "same" for row in rows),
+        "ok": not unreadable and not missing and all(row["state"] == "same" for row in rows),
         "template_sha": sha,
         "template_chars": len(rendered),
         "jobs": rows,
