@@ -204,7 +204,15 @@ SECRET_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("slack_token", re.compile(r"xox[abprs]-[A-Za-z0-9-]{8,}")),
     ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("google_api_key", re.compile(r"AIza[0-9A-Za-z_-]{30,}")),
-    ("bearer", re.compile(r"(?i)\b(?:authorization\s*:\s*(?:bearer\s+)?|bearer\s+)[A-Za-z0-9._~+/=-]{8,}")),
+    (
+        "bearer",
+        re.compile(
+            r"(?i)\b(?:"
+            r"authorization\s*:\s*(?:bearer\s+)?[A-Za-z0-9._~+/=-]{8,}"
+            r"|bearer\s+(?:(?=[A-Za-z0-9._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{8,}|[A-Za-z0-9._~+/=-]{20,})"
+            r")"
+        ),
+    ),
     (
         "credential",
         re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*[^\s\"',;]{8,}"),
@@ -461,8 +469,21 @@ def _first_line(text: Any, limit: int) -> str:
     return ""
 
 
+def _last_meaningful_line(text: Any, limit: int) -> str:
+    """terminal 失敗用: 空行・閉じ括弧や記号のみの行を除いた末尾の有意な行。"""
+    if not isinstance(text, str):
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    for ln in reversed(lines):
+        if re.search(r"\w", ln):
+            return _clip(ln, limit)
+    return _clip(lines[-1], limit)
+
+
 def _failure_detail(tool: str, payload: Dict[str, Any]) -> Optional[str]:
-    """失敗なら「失敗の1行目」、成功・未知の形なら None。"""
+    """失敗なら要約（terminal は最後の有意な行、他は1行目）、成功・未知の形なら None。"""
     error = payload.get("error")
     error_text = error.strip() if isinstance(error, str) else ""
     if tool == "terminal":
@@ -470,7 +491,7 @@ def _failure_detail(tool: str, payload: Dict[str, Any]) -> Optional[str]:
         failed = (isinstance(code, int) and not isinstance(code, bool) and code != 0) or bool(error_text)
         if not failed:
             return None
-        return _first_line(error_text or payload.get("output"), FAIL_DETAIL_CHARS) or "（出力なし）"
+        return _last_meaningful_line(error_text or payload.get("output"), FAIL_DETAIL_CHARS) or "（出力なし）"
     if tool in ("patch", "write_file"):
         if payload.get("success") is not False and not error_text:
             return None

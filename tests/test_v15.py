@@ -173,7 +173,7 @@ class FailureMaterialTests(unittest.TestCase):
             _tool_result(
                 "call_t_bad",
                 "terminal",
-                {"output": "boom\nsecond", "exit_code": 1, "error": None},
+                {"output": "setup\nboom", "exit_code": 1, "error": None},
                 _ts(10, 5),
             ),
             _assistant_call("call_p_bad", "patch", {"path": "/repo/a.py"}, _ts(10, 6)),
@@ -223,6 +223,34 @@ class FailureMaterialTests(unittest.TestCase):
         material = core.collect_material(DAY, home=home, repos=[])["material"]
         section = _section(material, "## ツールの失敗（原因は未確認）")
         self.assertIn("（失敗は記録されていない）", section)
+
+    def _terminal_failure_line(self, output: str) -> str:
+        rows = [
+            _assistant_call("call_t", "terminal", {"command": "python3 x.py"}, _ts(10)),
+            _tool_result("call_t", "terminal", {"output": output, "exit_code": 1, "error": None}, _ts(10)),
+        ]
+        home = make_profile(self.root, rows)
+        material = core.collect_material(DAY, home=home, repos=[])["material"]
+        section = _section(material, "## ツールの失敗（原因は未確認）")
+        return next(line for line in section.splitlines() if "python3 x.py" in line)
+
+    def test_terminal_failure_uses_the_last_meaningful_line(self):
+        traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "x.py", line 3, in <module>\n'
+            "ValueError: bad input"
+        )
+        line = self._terminal_failure_line(traceback)
+        self.assertTrue(line.endswith("→ ValueError: bad input"), line)
+        self.assertNotIn("Traceback", line)
+
+    def test_terminal_failure_skips_trailing_punctuation_only_lines(self):
+        line = self._terminal_failure_line('{\n  "ok": false,\n  "state": "diff"\n}\n')
+        self.assertTrue(line.endswith('→ "state": "diff"'), line)
+
+    def test_terminal_failure_detail_is_clipped(self):
+        line = self._terminal_failure_line("first\n" + "x" * 400)
+        self.assertLessEqual(len(line.split("→ ", 1)[1]), core.FAIL_DETAIL_CHARS)
 
 
 class SelfReportMaterialTests(unittest.TestCase):
@@ -303,6 +331,25 @@ class RedactionTests(unittest.TestCase):
         self.assertTrue(got["truncated"])
         self.assertNotIn(core.MASK_COUNT_TOKEN, got["material"])
         self.assertIn("マスク: 1 件", got["material"])
+
+
+class BearerRedactionTests(unittest.TestCase):
+    def _kinds(self, text: str) -> dict:
+        return core.redact_secrets(text)[1]
+
+    def test_plain_prose_after_bearer_is_not_a_secret(self):
+        self.assertEqual(self._kinds("bearer authentication is used"), {})
+        self.assertEqual(self._kinds("the bearer tokens expire"), {})
+
+    def test_bare_bearer_with_a_digit_or_long_value_is_masked(self):
+        self.assertEqual(self._kinds("bearer abcdefgh12345"), {"bearer": 1})
+        self.assertEqual(self._kinds("bearer " + "a" * 24), {"bearer": 1})
+
+    def test_authorization_header_is_masked_even_when_short(self):
+        masked, counts = core.redact_secrets("Authorization: Bearer abcdefgh")
+        self.assertEqual(counts, {"bearer": 1})
+        self.assertNotIn("abcdefgh", masked)
+        self.assertEqual(self._kinds("Authorization: abcdefgh"), {"bearer": 1})
 
 
 class CommitScopeTests(unittest.TestCase):
