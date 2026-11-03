@@ -126,6 +126,32 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
         self.assertIn(core.SECTIONS[0], out.getvalue())
 
+    def test_mode_flags_are_rejected_outside_prompt(self):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = cli_mod.main(["material", "--check"])
+        self.assertEqual(code, 2)
+        self.assertIn("prompt", err.getvalue())
+
+    def test_broken_template_does_not_leak_a_traceback(self):
+        err = io.StringIO()
+        with patch.object(core, "render_cron_prompt", side_effect=ValueError("boom")), \
+             redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = cli_mod.main(["prompt", "--apply", "--profile", "alpha"])
+        self.assertEqual(code, 2)
+        self.assertIn("boom", err.getvalue())
+
+    def test_unreadable_jobs_file_is_not_reported_as_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "profiles"
+            broken = root / "alpha" / "cron" / "jobs.json"
+            broken.parent.mkdir(parents=True)
+            broken.write_text("{not json", encoding="utf-8")
+            result = core.check_cron_prompt(profiles_root=root)
+        self.assertEqual(result["unreadable_profiles"], ["alpha"])
+        self.assertEqual(result["missing_profiles"], [])
+        self.assertFalse(result["ok"])
+
 
 class ApplyTests(unittest.TestCase):
     def _runner_that_writes(self, jobs_path: Path, rendered: str):
@@ -166,6 +192,18 @@ class ApplyTests(unittest.TestCase):
             code = cli_mod.main(["prompt", "--apply"])
         self.assertEqual(code, 2)
         self.assertIn("--profile", err.getvalue())
+
+    def test_apply_surfaces_stderr_from_the_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_path = Path(tmp) / "profiles" / "alpha" / "cron" / "jobs.json"
+            _write_jobs(jobs_path, "古いプロンプト")
+            result = core.apply_cron_prompt(
+                "alpha", jobs_path=jobs_path, runner=lambda cmd: (1, "job not found")
+            )
+        row = result["applied"][0]
+        self.assertEqual(row["exit_code"], 1)
+        self.assertEqual(row["stderr"], "job not found")
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":

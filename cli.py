@@ -99,6 +99,12 @@ def _warn_unscoped(home: Path, source: str) -> None:
 
 def _prompt(args: _Args) -> int:
     """cron プロンプトの描画・差分・適用。プロファイル解決は行わない。"""
+    try:
+        rendered = core.render_cron_prompt()
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
     if args.mode == "check":
         try:
             result = core.check_cron_prompt()
@@ -124,14 +130,14 @@ def _prompt(args: _Args) -> int:
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "applied": []}
             results.append(dict(profile=name, **result))
         ok = all(item.get("ok") for item in results)
-        print(core.json_dumps({"ok": ok, "template_sha": core._text_sha(core.render_cron_prompt()), "results": results}))
+        print(
+            core.json_dumps(
+                {"ok": ok, "template_sha": core._text_sha(rendered), "results": results}
+            )
+        )
         return 0 if ok else 1
 
-    try:
-        print(core.render_cron_prompt())
-    except Exception as exc:  # noqa: BLE001
-        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
+    print(rendered)
     return 0
 
 
@@ -140,6 +146,9 @@ def main(argv: List[str]) -> int:
         args = _parse(argv)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.mode and args.cmd != "prompt":
+        print(f"error: --{args.mode} は prompt でのみ使えます（指定: {args.cmd}）", file=sys.stderr)
         return 2
     if args.cmd == "prompt":
         return _prompt(args)

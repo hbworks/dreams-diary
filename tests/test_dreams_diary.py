@@ -407,6 +407,23 @@ class IndexAndRegistrationTests(unittest.TestCase):
             self.assertEqual(res["count"], 2)
             self.assertIn("2026-10-06", Path(res["path"]).read_text(encoding="utf-8"))
 
+    def test_index_reads_frontmatter_not_body(self):
+        # frontmatter に無い項目を本文から拾うと目次が嘘になる。frontmatter だけを読む
+        with tempfile.TemporaryDirectory() as tmp:
+            home = make_profile(Path(tmp))
+            diary = home / "dreams" / f"{DAY}.md"
+            diary.parent.mkdir(parents=True, exist_ok=True)
+            diary.write_text(
+                f"---\ndate: {DAY}\nauthor: \"@t\"\nsessions: 2\ncommit: none\n---\n\n"
+                f"# {DAY}\n\n## 考えたこと\nmessages: 999\n",
+                encoding="utf-8",
+            )
+            res = core.build_index(home=home)
+            index = Path(res["path"]).read_text(encoding="utf-8")
+            self.assertIn("セッション 2", index)
+            self.assertNotIn("メッセージ 999", index)
+            self.assertNotIn("999", index)
+
     def test_register_exposes_four_tools(self):
         import __init__ as plugin  # noqa: PLC0415
 

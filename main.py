@@ -39,6 +39,10 @@ INJECTED_PREFIXES = ("[IMPORTANT:", "[The user sent", "[System", "[SYSTEM")
 MAX_CHARS_SOFT = 3000
 MIN_CHARS_SOFT = 800
 
+# 日記ファイル名の唯一の定義。検査・遅延ゲート・監査・目次がそれぞれ別の正規表現を持つと、
+# `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
+DIARY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
+
 
 # ---------------------------------------------------------------- profile paths
 
@@ -173,10 +177,10 @@ def _sessions_material(day: str, home: Path) -> str:
         s["t1"] = r["timestamp"]
         if r["role"] == "user" and r["content"]:
             msg = _clip(r["content"], USER_MSG_CHARS)
-            if msg.startswith(INJECTED_PREFIXES):
-                continue
-            if not s["users"] or s["users"][-1] != msg:
-                s["users"].append(msg)
+            # 注入文脈は本文からは除くが、行そのもののツール集計は落とさない
+            if not msg.startswith(INJECTED_PREFIXES):
+                if not s["users"] or s["users"][-1] != msg:
+                    s["users"].append(msg)
         elif r["role"] == "assistant" and r["content"]:
             s["asst"] += 1
         if r["tool_name"]:
@@ -205,18 +209,21 @@ def _memory_material(day: str, home: Path) -> str:
     err: Optional[Exception] = None
     # WAL モードの DB は -shm/-wal が無い瞬間に mode=ro で開けないことがある。
     for uri, kw in ((f"file:{db}?mode=ro", {"uri": True}), (str(db), {})):
+        con = None
         try:
             con = sqlite3.connect(uri, timeout=10, **kw)
             rows = con.execute(
                 "select category, content from memories where date(created_at) = date(?)",
                 (day,),
             ).fetchall()
-            con.close()
             err = None
             break
         except sqlite3.Error as exc:
             err = exc
             rows = None
+        finally:
+            if con is not None:
+                con.close()
     if rows is None:
         return f"（memory 取得失敗: {err}）\n"
     if not rows:
@@ -296,12 +303,12 @@ def _previous_diary(day: str, home: Path) -> Optional[Path]:
     ddir = home / "dreams"
     if not ddir.is_dir():
         return None
-    candidates = [
-        f
-        for f in ddir.iterdir()
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-\d)?\.md", f.name) and f.stem[:10] < day
-    ]
-    return max(candidates, key=lambda f: f.stem) if candidates else None
+    candidates = []
+    for f in ddir.iterdir():
+        match = DIARY_NAME.match(f.name)
+        if match and match.group(1) < day:
+            candidates.append(((match.group(1), int(match.group(2) or 0)), f))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _gate_material(day: str, home: Path, repos: Optional[List[Path]] = None) -> str:
@@ -507,6 +514,27 @@ EXTERNAL_CONTEXT = re.compile(
 )
 
 
+def _frontmatter_lines(text: str) -> Optional[List[str]]:
+    """区切られた frontmatter の中身。無ければ None。"""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return lines[1:i]
+    return None
+
+
+def _frontmatter_fields(text: str) -> Dict[str, str]:
+    """frontmatter の key: value だけを返す。本文の同名行は拾わない。"""
+    fields: Dict[str, str] = {}
+    for line in _frontmatter_lines(text) or []:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$", line)
+        if match:
+            fields[match.group(1)] = (match.group(2) or "").strip()
+    return fields
+
+
 def _prose_chars(text: str) -> int:
     """本文だけの字数。frontmatter と見出し行を除き、空白も数えない。
 
@@ -569,16 +597,8 @@ def validate_diary(
     text = target.read_text(encoding="utf-8")
 
     issues: List[Dict[str, str]] = []
-    lines = text.splitlines()
-    frontmatter_end = next(
-        (i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
-        None,
-    )
-    has_frontmatter = (
-        bool(lines)
-        and lines[0].strip() == "---"
-        and frontmatter_end is not None
-    )
+    frontmatter_lines = _frontmatter_lines(text)
+    has_frontmatter = frontmatter_lines is not None
     if not has_frontmatter:
         issues.append(
             {
@@ -588,12 +608,7 @@ def validate_diary(
             }
         )
     else:
-        frontmatter_fields = {}
-        frontmatter_lines = lines[1:frontmatter_end]
-        for line in frontmatter_lines:
-            match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$", line)
-            if match:
-                frontmatter_fields[match.group(1)] = (match.group(2) or "").strip()
+        frontmatter_fields = _frontmatter_fields(text)
         required_fields = ("date", "author", "sessions", "messages", "commit")
         missing_fields = [key for key in required_fields if key not in frontmatter_fields]
         if missing_fields:
@@ -623,9 +638,7 @@ def validate_diary(
                     }
                 )
             else:
-                filename_date = re.fullmatch(
-                    r"(\d{4}-\d{2}-\d{2})(?:-\d)?", target.stem
-                )
+                filename_date = DIARY_NAME.match(target.name)
                 if filename_date and frontmatter_date != filename_date.group(1):
                     issues.append(
                         {
@@ -655,7 +668,7 @@ def validate_diary(
                     {
                         "level": "error",
                         "code": "invalid_frontmatter_field",
-                        "detail": "値が空または形式不正: " + ", ".join(sorted(set(invalid_fields)),),
+                        "detail": "値が空または形式不正: " + ", ".join(sorted(set(invalid_fields))),
                     }
                 )
 
@@ -741,7 +754,7 @@ def audit_diaries(
     results: List[Dict[str, Any]] = []
     if ddir.is_dir():
         files = sorted(
-            (f for f in ddir.iterdir() if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-\d)?\.md", f.name)),
+            (f for f in ddir.iterdir() if DIARY_NAME.match(f.name)),
             reverse=True,
         )[:limit]
         repos = repos if repos is not None else discover_repos()
@@ -773,10 +786,6 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
     if not ddir.exists():
         return {"ok": False, "count": 0, "path": str(ddir / "INDEX.md")}
 
-    def field(text: str, key: str) -> str:
-        m = re.search(rf"^{key}:\s*(.+)$", text, re.M)
-        return m.group(1).strip().strip('"') if m else ""
-
     def tail(text: str) -> str:
         m = re.search(rf"{re.escape(SECTIONS[-1])}\n+(.+?)(?:\n## |\Z)", text, re.S)
         return " ".join(m.group(1).split()) if m else ""
@@ -784,7 +793,7 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
     rows = []
     skipped: List[Dict[str, str]] = []
     for f in sorted(ddir.iterdir()):
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(-\d)?\.md", f.name):
+        if not DIARY_NAME.match(f.name):
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -792,7 +801,15 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
             # 1本読めないだけで目次全体を失わない。理由は INDEX にも残す。
             skipped.append({"file": f.name, "reason": f"{type(exc).__name__}: {exc}"})
             continue
-        rows.append((f.stem, field(text, "sessions"), field(text, "messages"), tail(text)))
+        fields = _frontmatter_fields(text)
+        rows.append(
+            (
+                f.stem,
+                fields.get("sessions", "").strip('"'),
+                fields.get("messages", "").strip('"'),
+                tail(text),
+            )
+        )
     rows.sort(reverse=True)
 
     out = ["# 夢日記 目次\n", f"全 {len(rows)} 本。各日の末尾の申し送りだけ抜粋。\n"]
@@ -861,12 +878,18 @@ def _profiles_root() -> Path:
 
 
 def _dreams_jobs(jobs_path: Path) -> List[Dict[str, Any]]:
-    """job 名ではなく script で同定する（プロファイルごとに名前が違うため）。"""
+    """job 名ではなく script で同定する（プロファイルごとに名前が違うため）。
+
+    jobs.json が読めないときは空リストではなく例外にする。空リストだと「ジョブが無い」のか
+    「ファイルが壊れている」のか区別できず、点検が静かに通ってしまう。
+    """
     try:
         data = json.loads(jobs_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    jobs = data.get("jobs", []) if isinstance(data, dict) else []
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"jobs.json を読めない: {jobs_path} ({type(exc).__name__})") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"jobs.json の形式が想定と違う: {jobs_path}")
+    jobs = data.get("jobs", [])
     return [job for job in jobs if Path(str(job.get("script") or "")).name == DREAMS_JOB_SCRIPT]
 
 
@@ -893,8 +916,13 @@ def check_cron_prompt(
     root = Path(profiles_root) if profiles_root is not None else _profiles_root()
     rows: List[Dict[str, Any]] = []
     missing: List[str] = []
+    unreadable: List[str] = []
     for profile, jobs_path in _jobs_files(root):
-        jobs = _dreams_jobs(jobs_path)
+        try:
+            jobs = _dreams_jobs(jobs_path)
+        except ValueError:
+            unreadable.append(profile)
+            continue
         if not jobs:
             missing.append(profile)
             continue
@@ -912,12 +940,27 @@ def check_cron_prompt(
                 }
             )
     return {
-        "ok": all(row["state"] == "same" for row in rows),
+        "ok": not unreadable and all(row["state"] == "same" for row in rows),
         "template_sha": sha,
         "template_chars": len(rendered),
         "jobs": rows,
         "missing_profiles": missing,
+        "unreadable_profiles": unreadable,
     }
+
+
+CRON_EDIT_TIMEOUT = 120
+
+
+def _run_cron_edit(cmd: List[str]) -> Tuple[int, str]:
+    """`hermes cron edit` を実行する。失敗理由を捨てずに (終了コード, stderr) で返す。"""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=CRON_EDIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, f"{CRON_EDIT_TIMEOUT} 秒で終わらなかった"
+    except OSError as exc:
+        return 127, f"{type(exc).__name__}: {exc}"
+    return proc.returncode, (proc.stderr or "").strip()
 
 
 def apply_cron_prompt(
@@ -926,25 +969,39 @@ def apply_cron_prompt(
     jobs_path: Optional[Path] = None,
     runner: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """保存済みプロンプトを描画結果で置き換え、書き込み後に読み直して検証する。"""
+    """保存済みプロンプトを描画結果で置き換え、書き込み後に読み直して検証する。
+
+    ``runner`` は ``cmd -> 終了コード`` か ``cmd -> (終了コード, stderr)`` を返す差し替え用フック。
+    """
     rendered = render_cron_prompt(template_path)
     path = Path(jobs_path) if jobs_path is not None else _profiles_root() / profile / "cron" / "jobs.json"
     if not path.exists():
         return {"ok": False, "error": f"jobs.json がありません: {path}", "applied": []}
-    jobs = _dreams_jobs(path)
+    try:
+        jobs = _dreams_jobs(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "applied": []}
     if not jobs:
         return {"ok": False, "error": f"{profile} に dreams ジョブがありません", "applied": []}
 
-    run = runner or (
-        lambda cmd: subprocess.run(cmd, capture_output=True, text=True).returncode
-    )
+    run = runner or _run_cron_edit
     applied: List[Dict[str, Any]] = []
     for job in jobs:
         job_id = job.get("id") or ""
-        code = run(["hermes", "-p", profile, "cron", "edit", job_id, "--prompt", rendered])
-        applied.append({"job_id": job_id, "name": job.get("name"), "exit_code": code})
+        outcome = run(["hermes", "-p", profile, "cron", "edit", job_id, "--prompt", rendered])
+        if isinstance(outcome, tuple):
+            code, stderr = outcome
+        else:
+            code, stderr = outcome, ""
+        row: Dict[str, Any] = {"job_id": job_id, "name": job.get("name"), "exit_code": code}
+        if stderr:
+            row["stderr"] = stderr
+        applied.append(row)
 
-    stored = {row.get("id"): (row.get("prompt") or "") for row in _dreams_jobs(path)}
+    try:
+        stored = {row.get("id"): (row.get("prompt") or "") for row in _dreams_jobs(path)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "applied": applied}
     for row in applied:
         current = stored.get(row["job_id"])
         row["chars"] = len(current or "")
