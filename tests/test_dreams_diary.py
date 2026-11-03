@@ -512,6 +512,30 @@ class ProfileSourceTests(unittest.TestCase):
         stub.get_hermes_home_override = lambda: None
         return stub
 
+    def test_profile_resolves_under_a_custom_hermes_root(self):
+        # HERMES_HOME が標準外の場所を指すとき、~/.hermes の同名プロファイルを選ばない
+        with tempfile.TemporaryDirectory() as tmp:
+            custom = Path(tmp) / "custom-hermes"
+            profile_home = custom / "profiles" / "tester"
+            profile_home.mkdir(parents=True)
+            decoy = Path(tmp) / ".hermes" / "profiles" / "tester"
+            decoy.mkdir(parents=True)
+            stub = self._stub(profile_home)
+            with patch.dict(
+                os.environ,
+                {"HOME": tmp, "HERMES_HOME": str(profile_home), "HERMES_PROFILE": ""},
+            ), patch.dict(sys.modules, {"hermes_constants": stub}):
+                home, source = core.resolve_profile_home_source("tester")
+            self.assertEqual(source, "explicit")
+            self.assertEqual(home, profile_home)
+
+    def test_hermes_root_override_is_honoured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit = Path(tmp) / "elsewhere"
+            with patch.dict(os.environ, {"DREAMS_HERMES_ROOT": str(explicit)}):
+                self.assertEqual(core._hermes_root(), explicit)
+                self.assertEqual(core._profiles_root(), explicit / "profiles")
+
     def test_active_profile_is_reported_as_unreliable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".hermes"

@@ -34,9 +34,17 @@ One source of truth in this repo, linked into the default profile and then into 
 agent profile (the same pattern used for `sqlite-memory`):
 
 ```sh
-ln -s ~/Dev/git/hermes-plugins/dreams-diary ~/.hermes/plugins/dreams-diary
-ln -s ~/.hermes/plugins/dreams-diary ~/.hermes/profiles/<profile>/plugins/dreams-diary
+# このリポジトリはどの場所に置いてもよい（例: ~/plugins/dreams-diary）
+cd /path/to/dreams-diary
+ln -s "$PWD" "${HERMES_ROOT:-$HOME/.hermes}/plugins/dreams-diary"
+ln -s "$PWD" "$HOME/.hermes/profiles/<profile>/plugins/dreams-diary"
 ```
+
+Paths come from `HERMES_HOME`, not from a hardcoded `~/.hermes`: a profile home is
+`<root>/profiles/<name>`, and the CLI resolves `--profile` against that root. If the layout
+differs from the standard one, set `DREAMS_HERMES_ROOT` (root) or `DREAMS_PROFILES_ROOT`
+(the directory holding the profiles) explicitly — otherwise `--profile` can point at a
+same-named profile under `~/.hermes` instead of the one you meant.
 
 Enable it through the profile-aware CLI (do not edit `config.yaml` directly), then restart
 the agent so the tools register:
@@ -53,9 +61,9 @@ resolved to the active profile's `HERMES_HOME/scripts/`; an absolute path to the
 source of truth while satisfying that path boundary.
 
 ```sh
-cd ~/Dev/git/hermes-plugins/dreams-diary
-PROFILE=research
-PROFILE_HOME="$HOME/.hermes/profiles/$PROFILE"
+cd /path/to/dreams-diary
+PROFILE=<name>
+PROFILE_HOME="${HERMES_PROFILE_HOME:-$HOME/.hermes/profiles/$PROFILE}"
 mkdir -p "$PROFILE_HOME/scripts"
 cp scripts/dreams_diary_material.py scripts/dreams_diary_validate.py "$PROFILE_HOME/scripts/"
 hermes -p "$PROFILE" plugins enable dreams-diary
@@ -84,8 +92,8 @@ into the prose: each cron job stores its own copy of the rendered text, so a dup
 stale in one copy at a time. Lines starting with `<!--` are editor notes and are stripped on render.
 
 A job keeps the prompt it was created with, so editing the template changes nothing until it is
-re-applied. Jobs are identified by their `script` (`dreams_diary_material.py`), not by name — the
-research job is called `muse-dreams-diary`:
+re-applied. Jobs are identified by their `script` (`dreams_diary_material.py`), not by name — a job
+can be renamed (research's was once `muse-dreams-diary`), and a name match would then miss it:
 
 ```sh
 python3 cli.py prompt                             # render to stdout
@@ -97,9 +105,10 @@ python3 cli.py prompt --apply --profile research  # rewrite, then read back and 
 `cron/jobs.json` after the edit and reports `verified: false` when the stored text did not change.
 
 Every CLI command accepts `--profile <name>` (or `-p`). Without it, the CLI resolves the home
-from Hermes' context-local override, then `HERMES_HOME`, then `HERMES_PROFILE`, and only then
-`~/.hermes/active_profile` — a global pointer to whichever profile was last used. When it has to
-fall back to `active_profile` or the bare `~/.hermes` root, it prints a warning naming the home it
+from Hermes' context-local override, then `HERMES_HOME`, then `HERMES_PROFILE`, and only then the
+root's `active_profile` — a global pointer to whichever profile was last used. The root is
+`~/.hermes` unless `HERMES_HOME` (a profile home) or `DREAMS_HERMES_ROOT` says otherwise. When it
+has to fall back to `active_profile` or the bare root, it prints a warning naming the home it
 picked, so a stray shell invocation cannot silently read or write another agent's diary:
 
 ```sh

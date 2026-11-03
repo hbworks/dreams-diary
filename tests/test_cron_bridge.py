@@ -199,6 +199,19 @@ class ProfileResolutionTests(unittest.TestCase):
             ):
                 self.assertEqual(bridge.pick_profile([]), "explicit")
 
+    def test_custom_hermes_root_is_used_for_profiles(self) -> None:
+        bridge = _load_bridge()
+        with tempfile.TemporaryDirectory() as tmp:
+            custom = Path(tmp) / "custom-hermes"
+            (custom / "profiles" / "tester").mkdir(parents=True)
+            with _env(
+                HOME=str(Path(tmp) / "home"),
+                HERMES_HOME=str(custom / "profiles" / "tester"),
+                HERMES_SESSION_PROFILE=None,
+                HERMES_PROFILE=None,
+            ):
+                self.assertEqual(bridge.pick_profile([]), "tester")
+
     def test_newest_state_db_is_the_last_resort(self) -> None:
         bridge = _load_bridge()
         with tempfile.TemporaryDirectory() as tmp:

@@ -53,6 +53,47 @@ MEMORY_CEILING = 400
 # ---------------------------------------------------------------- profile paths
 
 
+def _root_from_home(home: Path) -> Optional[Path]:
+    """home が root か、プロファイル home かを見分けて root を返す。判定できなければ None。"""
+    if home.parent.name == "profiles":
+        return home.parent.parent
+    if (home / "profiles").is_dir() or home.name.startswith("."):
+        return home
+    return None
+
+
+def _hermes_root() -> Path:
+    """`~/.hermes` に相当する root。`HERMES_HOME` がプロファイル home を指すならその親の親。
+
+    標準レイアウト（`<root>` または `<root>/profiles/<name>`）を前提に root を取り出す。
+    別レイアウトは `DREAMS_HERMES_ROOT` で明示する。`~/.hermes` を直書きすると、
+    hermes の home を別の場所に置いた環境で `--profile` が誤った場所を指し、同名の
+    別プロファイルを黙って読み書きしてしまう。
+    """
+    override = os.environ.get("DREAMS_HERMES_ROOT", "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+
+    candidates: List[Path] = []
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env:
+        candidates.append(Path(os.path.expanduser(env)))
+    try:  # ホストから呼ばれたときは、その home が最も確実
+        import hermes_constants as hc
+
+        get_home = getattr(hc, "get_hermes_home", None)
+        if callable(get_home):
+            candidates.append(Path(get_home()).expanduser())
+    except Exception:  # noqa: BLE001 - ホスト外（CLI 単体）では import できない
+        pass
+
+    for candidate in candidates:
+        root = _root_from_home(candidate)
+        if root is not None:
+            return root
+    return Path(os.path.expanduser("~/.hermes"))
+
+
 def resolve_profile_home(profile: Optional[str] = None) -> Path:
     """アクティブなプロファイルの home を返す（解決経路は resolve_profile_home_source を見る）。"""
     return resolve_profile_home_source(profile)[0]
@@ -62,15 +103,15 @@ def resolve_profile_home_source(profile: Optional[str] = None) -> Tuple[Path, st
     """home と、その解決経路を返す。
 
     経路: explicit（引数）→ context（Hermes のコンテキストローカル override）→
-    env（HERMES_HOME）→ profile_env（HERMES_PROFILE）→ active_profile（~/.hermes の共通ポインタ）
-    → root（~/.hermes）。
+    env（HERMES_HOME）→ profile_env（HERMES_PROFILE）→ active_profile（root の共通ポインタ）
+    → root。root は `_hermes_root()` が返す（既定は `~/.hermes`）。
 
     active_profile / root は「たまたま最後に触ったプロファイル」を指しうる。黙って
     そこへ書くと別プロファイルの記憶や日記を壊すため、呼び出し側が警告できるよう
     経路も返す。
     """
     if profile and str(profile).strip():
-        p = Path(os.path.expanduser(f"~/.hermes/profiles/{str(profile).strip()}"))
+        p = _hermes_root() / "profiles" / str(profile).strip()
         if p.exists():
             return p, "explicit"
     try:
@@ -90,20 +131,21 @@ def resolve_profile_home_source(profile: Optional[str] = None) -> Tuple[Path, st
         return Path(os.path.expanduser(env)), "env"
     prof = os.environ.get("HERMES_PROFILE", "").strip()
     if prof:
-        p = Path(os.path.expanduser(f"~/.hermes/profiles/{prof}"))
+        p = _hermes_root() / "profiles" / prof
         if p.exists():
             return p, "profile_env"
     try:
-        active = Path(os.path.expanduser("~/.hermes/active_profile"))
+        root = _hermes_root()
+        active = root / "active_profile"
         if active.exists():
             name = active.read_text(encoding="utf-8").strip()
             if name:
-                p = Path(os.path.expanduser(f"~/.hermes/profiles/{name}"))
+                p = root / "profiles" / name
                 if p.exists():
                     return p, "active_profile"
     except OSError:
         pass
-    return Path(os.path.expanduser("~/.hermes")), "root"
+    return _hermes_root(), "root"
 
 
 def dreams_dir(home: Optional[Path] = None) -> Path:
@@ -855,7 +897,7 @@ def _profiles_root() -> Path:
     override = os.environ.get("DREAMS_PROFILES_ROOT")
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".hermes" / "profiles"
+    return _hermes_root() / "profiles"
 
 
 def _dreams_jobs(jobs_path: Path) -> List[Dict[str, Any]]:

@@ -32,29 +32,42 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DIARY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})(-\d+)?\.md$")
 
 
+def _hermes_root() -> Path:
+    """`~/.hermes` に相当する root。標準レイアウト（<root> か <root>/profiles/<name>）を前提にする。"""
+    override = os.environ.get("DREAMS_HERMES_ROOT", "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        home = Path(os.path.expanduser(hermes_home))
+        if home.parent.name == "profiles":
+            return home.parent.parent
+        if (home / "profiles").is_dir() or home.name.startswith("."):
+            return home
+    return Path.home() / ".hermes"
+
+
 def _plugin_cli() -> Path:
-    hermes_root = Path.home() / ".hermes"
+    root = _hermes_root()
     candidates: list[Path] = []
     hermes_home = os.environ.get("HERMES_HOME", "").strip()
     if hermes_home:
         candidates.append(Path(hermes_home).expanduser() / "plugins" / "dreams-diary" / "cli.py")
     profile = os.environ.get("HERMES_PROFILE", "").strip()
     if profile:
-        candidates.append(
-            hermes_root / "profiles" / profile / "plugins" / "dreams-diary" / "cli.py"
-        )
-    candidates.append(hermes_root / "plugins" / "dreams-diary" / "cli.py")
+        candidates.append(root / "profiles" / profile / "plugins" / "dreams-diary" / "cli.py")
+    candidates.append(root / "plugins" / "dreams-diary" / "cli.py")
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     raise SystemExit(
-        "Dreams Diary CLI not found in the active profile or ~/.hermes/plugins; "
+        "Dreams Diary CLI not found in the active profile or <hermes root>/plugins; "
         "install the dreams-diary plugin before running this cron bridge."
     )
 
 
 def _profiles_root() -> Path:
-    return Path.home() / ".hermes" / "profiles"
+    return _hermes_root() / "profiles"
 
 
 def _existing_profile(name: str) -> str:
