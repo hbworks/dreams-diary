@@ -1,6 +1,6 @@
 name: dreams-diary
 label: Dreams Diary (自己日記)
-version: 1.4.3
+version: 1.4.4
 description: >-
   Agents keep a nightly diary of their own day. Material (sessions, tools, commits,
   memory writes), a six-section skeleton, a validator that catches fabricated commit

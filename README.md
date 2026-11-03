@@ -12,7 +12,7 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 | Tool | Purpose |
 | :--- | :--- |
 | `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file holds the full text, and a successful text response (including its locator or truncation notice) stays within `max_chars`. A budget too small for the notice returns an error. |
-| `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). |
+| `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`; overwriting a file that already has prose keeps the old copy beside it as `<date>.md.bak`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). |
 | `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports the prose char count (frontmatter and headings excluded; warns under 800 / over 3000), and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
 | `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
 
@@ -123,6 +123,9 @@ $ env -u HERMES_HOME python3 cli.py material 2026-11-01
 
 `dreams_index` / `cli.py index` never fails on a single bad file: unreadable diaries are skipped,
 reported in `skipped`, and listed in `INDEX.md` under 読めなかった日記 so the gap stays visible.
+Names that look like dates but are not `YYYY-MM-DD` (e.g. `2026-11-3.md`) are reported the same way,
+because they never match the diary filename and would otherwise drop out of the index silently —
+`dreams_write` and `cli.py write` reject such dates up front.
 夜間ジョブの最後の手順が `dreams_index` を呼ぶので、目次は日記より1日遅れない。ツールは引数を取らず、
 登録済み home に書くが、その home がプロファイルではなく root（`~/.hermes`）や不明な場所に解決された場合は
 書かずにエラーを返す（cron worker の home ずれ対策）。同じ guard は素材保存と雛形作成にも適用される。

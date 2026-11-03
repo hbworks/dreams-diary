@@ -296,6 +296,36 @@ class SkeletonTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.write_skeleton(DAY, home=self.home, messages="many")
 
+    def test_force_keeps_backup_of_written_body(self):
+        # force は従来どおり上書きするが、本文があるときだけ元の内容を .bak に残す。
+        res = core.write_skeleton(DAY, home=self.home, sessions=2, messages=7)
+        path = Path(res["path"])
+        path.write_text(path.read_text(encoding="utf-8") + "\n書いた本文。\n", encoding="utf-8")
+        forced = core.write_skeleton(DAY, home=self.home, force=True)
+        self.assertTrue(forced["ok"])
+        self.assertIsNotNone(forced["backup_path"])
+        backup = Path(forced["backup_path"])
+        self.assertEqual(backup.name, f"{DAY}.md.bak")
+        self.assertIn("書いた本文。", backup.read_text(encoding="utf-8"))
+        # 目次には載らない
+        self.assertEqual(core.build_index(home=self.home)["count"], 1)
+
+    def test_force_on_empty_skeleton_makes_no_backup(self):
+        core.write_skeleton(DAY, home=self.home)
+        forced = core.write_skeleton(DAY, home=self.home, force=True)
+        self.assertTrue(forced["ok"])
+        self.assertIsNone(forced["backup_path"])
+        self.assertEqual(list((self.home / "dreams").glob("*.bak")), [])
+
+    def test_skeleton_rejects_non_padded_dates(self):
+        # strptime は "2026-11-3" を通すが、そのファイル名は DIARY_NAME に一致せず
+        # INDEX から静かに漏れる。書き込みの入口で書式を固定する。
+        for bad in ("2026-11-3", "2026-1-1", "26-01-01"):
+            with self.subTest(day=bad):
+                with self.assertRaises(ValueError):
+                    core.write_skeleton(bad, home=self.home)
+        self.assertEqual(list((self.home / "dreams").glob("*.md")), [])
+
     def test_skeleton_refuses_to_write_under_root_home(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "custom-hermes"
@@ -577,6 +607,19 @@ class IndexAndRegistrationTests(unittest.TestCase):
             index = Path(res["path"]).read_text(encoding="utf-8")
             self.assertIn("読めなかった日記", index)
             self.assertIn("2026-10-06.md", index)
+
+    def test_index_reports_date_like_names_it_cannot_list(self):
+        # 書式違いの名前は INDEX から漏れる。黙って消えると気づけないので理由を残す。
+        with tempfile.TemporaryDirectory() as tmp:
+            home = make_profile(Path(tmp))
+            core.write_skeleton(DAY, home=home)
+            (home / "dreams" / "2026-11-3.md").write_text("noop", encoding="utf-8")
+            (home / "dreams" / "persona.md").write_text("noop", encoding="utf-8")
+            res = core.build_index(home=home)
+            self.assertEqual(res["count"], 1)
+            self.assertEqual([s["file"] for s in res["skipped"]], ["2026-11-3.md"])
+            index = Path(res["path"]).read_text(encoding="utf-8")
+            self.assertIn("2026-11-3.md", index)
 
     def test_index_counts_entries(self):
         with tempfile.TemporaryDirectory() as tmp:

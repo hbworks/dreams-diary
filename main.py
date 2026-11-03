@@ -51,6 +51,8 @@ MIN_CHARS_SOFT = 800
 # 日記ファイル名の唯一の定義。検査・遅延ゲート・監査・目次がそれぞれ別の正規表現を持つと、
 # `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
 DIARY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
+# 既存の日記ディレクトリに紛れ込みうる「日付っぽいが INDEX 対象外」の名前。
+LOOSE_DATE_NAME = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}(?:-\d+)?\.md$")
 
 
 def _diary_sort_key(path: Path) -> Tuple[str, int]:
@@ -143,11 +145,16 @@ def today() -> str:
 def _valid_date(day: Optional[str]) -> str:
     if not day:
         return today()
+    text = day if isinstance(day, str) else str(day)
+    # strptime は "2026-11-3" のような非ゼロ埋めも通すが、その名前のファイルは
+    # DIARY_NAME に一致せず INDEX から静かに漏れる。書式はここで厳密に固定する。
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        raise ValueError(f"日付は YYYY-MM-DD で指定してください（受領: {day!r}）")
     try:
-        datetime.datetime.strptime(day, "%Y-%m-%d")
+        datetime.datetime.strptime(text, "%Y-%m-%d")
     except ValueError as exc:
         raise ValueError(f"日付は YYYY-MM-DD で指定してください（受領: {day!r}）") from exc
-    return day
+    return text
 
 
 def _clip(text: str, limit: int) -> str:
@@ -592,6 +599,24 @@ def write_skeleton(
             "reason": "exists",
             "message": f"{path} は既にある。上書きするなら force=true、別名にするなら日記を手で書く。",
         }
+    backup_path: Optional[Path] = None
+    if path.exists() and force:
+        # 本文の入った日記を空の雛形で潰す事故を防ぐ。force の意味は変えず、
+        # 元の内容を同じ場所に .bak として残すだけ（INDEX の対象名ではない）。
+        try:
+            original = path.read_bytes()
+        except OSError:
+            original = b""
+        try:
+            has_prose = _prose_chars(original.decode("utf-8")) > 0
+        except UnicodeDecodeError:
+            has_prose = bool(original)
+        if has_prose:
+            backup_path = path.with_name(path.name + ".bak")
+            try:
+                backup_path.write_bytes(original)
+            except OSError:
+                backup_path = None
     author = author or _author_name(home)
     text = (
         "---\n"
@@ -611,6 +636,7 @@ def write_skeleton(
         "ok": True,
         "path": str(path),
         "persona_path": str(persona) if persona.exists() else None,
+        "backup_path": str(backup_path) if backup_path else None,
         "sections": list(SECTIONS),
         "counts_filled": bool(sessions_text or messages_text),
         "message": "節見出しだけ置いた。素材を読み、自分の声で各節を埋めること。",
@@ -952,6 +978,14 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
     skipped: List[Dict[str, str]] = []
     for f in sorted(ddir.iterdir()):
         if not DIARY_NAME.match(f.name):
+            # 日付に見えるのに書式が違う名前は、黙って目次から消えると気づけない。
+            if LOOSE_DATE_NAME.match(f.name):
+                skipped.append(
+                    {
+                        "file": f.name,
+                        "reason": "ファイル名の日付が YYYY-MM-DD ではないため INDEX の対象外",
+                    }
+                )
             continue
         try:
             text = f.read_text(encoding="utf-8")
