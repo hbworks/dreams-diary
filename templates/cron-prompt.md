@@ -7,6 +7,7 @@
 - cron の pre-run script が注入する素材Markdownを使う。Cron では profile home がずれる可能性があるため、`dreams_material` と `dreams_write` は呼ばない。
 - 素材の `日記ファイル:` にある絶対パスを、この実行のプロフィール保存先として使う。`read_file` / `write_file` は直接呼び出し、`tool_call` で包まない。
 - `dreams_validate` は必ず書いたファイルの絶対パスを `path` に渡して直接呼び出す。date だけの検査は使わない。
+- `dreams_index` は引数を取らない。返った `path` を必ず検算し、想定と違う home を指していたら書き込みを広げない。
 
 ## 手順
 1. プロンプト上部の素材Markdownから対象日と `日記ファイル:` の絶対パスを確認する。素材が無い・別日なら書かずに不足を報告する。対象日は素材の見出しを優先し、現在日と取り違えない。
@@ -16,6 +17,7 @@
 5. `write_file` で未使用の正確な絶対パスに日記本文を書く。次の6節をこの順・この見出しのまま使い、素材で裏付けられる範囲を自分の声で書く。
 6. frontmatter に `date` / `author` / `sessions` / `messages` / `commit` を含める。値は素材から転記する。無い情報を推測で埋めない。
 7. 書いた**正確なファイルパス**を `dreams_validate` の `path` に渡す。`ok` が `true` になるまで、指摘された error を修正して再検査する。warning は内容を確認し、根拠のない記述を残さない。
+8. 検査が通ったら `dreams_index` を呼んで `INDEX.md` を更新する。返った `path` が `日記ファイル:` の親ディレクトリ配下の `INDEX.md` と一致するか確認し、違う場所を指したら（cron worker の home ずれ）それ以上書かずに最終応答で報告する。
 ## 6節（見出しを変えない）
 
 {{SECTIONS}}

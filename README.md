@@ -109,6 +109,10 @@ $ env -u HERMES_HOME python3 cli.py material 2026-11-01
 
 `dreams_index` / `cli.py index` never fails on a single bad file: unreadable diaries are skipped,
 reported in `skipped`, and listed in `INDEX.md` under 読めなかった日記 so the gap stays visible.
+夜間ジョブの最後の手順が `dreams_index` を呼ぶので、目次は日記より1日遅れない。ツールは引数を取らず、
+登録済み home に書くが、その home が root（`~/.hermes`）に解決された場合は書かずにエラーを返す
+（cron worker の home ずれ対策）。遅れているプロファイルは
+`python3 cli.py --profile <name> index` で1コマンドで作り直せる。
 
 ### Late gate (cron has no post-run hook)
 
@@ -117,6 +121,15 @@ backstop, every material pack starts with `## 前回の日記の検証`: the mos
 validated and a failure is printed with its codes and absolute path, which the cron prompt tells
 the agent to fix before writing today's entry. `cli.py audit [--days N]` does the same across the
 last N diaries for manual or pipeline use and exits non-zero when any fails.
+
+### Index after the write
+
+The nightly prompt's last step calls `dreams_index`, so `INDEX.md` no longer lags a day behind the
+diaries. `dreams_index` takes no arguments and writes into the home the plugin registered for; when
+that home is the root `~/.hermes` (a cron worker can resolve there), the tool refuses and returns an
+error instead of creating a stray `dreams/INDEX.md`. The prompt also tells the agent to compare the
+returned `path` with the diary's own directory before trusting the result. A profile whose index is
+still behind can be rebuilt in one command: `python3 cli.py --profile <name> index`.
 
 ### Manual checks
 
