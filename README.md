@@ -53,25 +53,46 @@ the agent so the tools register:
 hermes -p <profile> plugins enable dreams-diary
 ```
 
-## Nightly cron (per profile)
+## Install & Nightly cron (per profile)
 
 Scheduling is core, not plugin — register one job per agent. Hermes confines cron scripts
 resolved to the active profile's `HERMES_HOME/scripts/`; an absolute path to the plugin's
 `cli.py` under `plugins/` is rejected. The small bridge keeps the plugin CLI as the single
 source of truth while satisfying that path boundary.
 
+### Recommended: One-command install and sync
+
+```sh
+cd /path/to/dreams-diary
+
+# 1. Install to a profile (symlinks plugin, copies scripts, enables plugin, creates cron job)
+python3 cli.py install --profile <name>
+
+# 2. Check sync status across all profiles (scripts + cron prompts, read-only)
+python3 cli.py sync --check
+
+# 3. Synchronize scripts and prompts across all profiles in one go
+python3 cli.py sync --all
+```
+
+`install` is idempotent: running it again on an existing profile safely updates its bridge scripts
+and synchronizes its cron prompt without creating duplicate jobs.
+
+### Manual Setup (what install does under the hood)
+
 ```sh
 cd /path/to/dreams-diary
 PROFILE=<name>
 PROFILE_HOME="${HERMES_PROFILE_HOME:-$HOME/.hermes/profiles/$PROFILE}"
-mkdir -p "$PROFILE_HOME/scripts"
+mkdir -p "$PROFILE_HOME/plugins" "$PROFILE_HOME/scripts"
+ln -s "$PWD" "$PROFILE_HOME/plugins/dreams-diary"
 cp scripts/dreams_diary_material.py scripts/dreams_diary_validate.py scripts/dreams_diary_paths.py "$PROFILE_HOME/scripts/"
 hermes -p "$PROFILE" plugins enable dreams-diary
 hermes -p "$PROFILE" cron create "30 23 * * *" \
   --name dreams-diary \
   --script dreams_diary_material.py \
   --continuity \
-  "$(python3 -c 'from pathlib import Path; print(Path("templates/cron-prompt.md").read_text())')"
+  "$(python3 -c 'import main; print(main.render_cron_prompt())')"
 ```
 
 `templates/cron-prompt.md` is the shared prompt; it requires each profile to use its own

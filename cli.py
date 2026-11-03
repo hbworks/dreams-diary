@@ -10,6 +10,9 @@
     python3 cli.py prompt                                   # cron プロンプトを描画して出す
     python3 cli.py prompt --check                           # 保存済みプロンプトとの差分（読み取りのみ）
     python3 cli.py prompt --apply --profile NAME            # 描画結果で置き換え、読み直して検証
+    python3 cli.py install --profile NAME [--schedule EXPR] # 新規導入・再セットアップ（冪等）
+    python3 cli.py sync --check                             # 全プロファイルのスクリプト・プロンプト点検
+    python3 cli.py sync --all                               # 全プロファイルのスクリプト・プロンプト一括同期
 
 プロファイルを特定できない文脈（HERMES_HOME もコンテキストローカル home も無い）では
 ~/.hermes/active_profile — つまり「最後に触ったプロファイル」— に落ちる。別プロファイルの
@@ -38,6 +41,8 @@ class _Args(NamedTuple):
     days: int
     path: Optional[str]
     mode: Optional[str]  # "check" / "apply" / None
+    all_profiles: bool
+    schedule: str
 
 
 def _parse(argv: List[str]) -> _Args:
@@ -46,6 +51,8 @@ def _parse(argv: List[str]) -> _Args:
     path: Optional[str] = None
     days = 7
     mode: Optional[str] = None
+    all_profiles = False
+    schedule = "30 23 * * *"
     rest: List[str] = []
     args = list(argv)
     while args:
@@ -57,6 +64,17 @@ def _parse(argv: List[str]) -> _Args:
             continue
         if item.startswith("--profile="):
             profiles.append(item.split("=", 1)[1])
+            continue
+        if item == "--all":
+            all_profiles = True
+            continue
+        if item == "--schedule":
+            if not args:
+                raise ValueError("--schedule にはスケジュール式が必要です")
+            schedule = args.pop(0)
+            continue
+        if item.startswith("--schedule="):
+            schedule = item.split("=", 1)[1]
             continue
         if item == "--path":
             if not args:
@@ -85,7 +103,17 @@ def _parse(argv: List[str]) -> _Args:
         rest.append(item)
     cmd = rest[0] if rest else "material"
     day = rest[1] if len(rest) > 1 else None
-    return _Args(profiles[-1] if profiles else None, profiles, cmd, day, days, path, mode)
+    return _Args(
+        profiles[-1] if profiles else None,
+        profiles,
+        cmd,
+        day,
+        days,
+        path,
+        mode,
+        all_profiles,
+        schedule,
+    )
 
 
 def _warn_unscoped(home: Path, source: str) -> None:
@@ -141,17 +169,51 @@ def _prompt(args: _Args) -> int:
     return 0
 
 
+def _install(args: _Args) -> int:
+    """新規プロファイル導入または再セットアップ（冪等）。"""
+    if not args.profile:
+        print("error: install には --profile <name> が必要です", file=sys.stderr)
+        return 2
+    try:
+        res = core.install_profile(args.profile, schedule=args.schedule)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    print(core.json_dumps(res))
+    return 0 if res.get("ok") else 1
+
+
+def _sync(args: _Args) -> int:
+    """スクリプトおよび cron プロンプトの一括点検・同期。"""
+    check_only = (args.mode == "check")
+    if not check_only and not args.all_profiles and not args.profiles:
+        print("error: sync には --all または --profile <name> が必要です", file=sys.stderr)
+        return 2
+    targets = None if args.all_profiles else (args.profiles if args.profiles else None)
+    try:
+        res = core.sync_all(check_only=check_only, profiles=targets)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    print(core.json_dumps(res))
+    return 0 if res.get("ok") else 1
+
+
 def main(argv: List[str]) -> int:
     try:
         args = _parse(argv)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.mode and args.cmd != "prompt":
-        print(f"error: --{args.mode} は prompt でのみ使えます（指定: {args.cmd}）", file=sys.stderr)
+    if args.mode and args.cmd not in ("prompt", "sync"):
+        print(f"error: --{args.mode} は prompt または sync でのみ使えます（指定: {args.cmd}）", file=sys.stderr)
         return 2
     if args.cmd == "prompt":
         return _prompt(args)
+    if args.cmd == "install":
+        return _install(args)
+    if args.cmd == "sync":
+        return _sync(args)
     try:
         home, source = core.resolve_profile_home_source(args.profile)
     except Exception as exc:  # noqa: BLE001 - invalid explicit profile is a usage error

@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -1444,6 +1445,11 @@ def json_dumps(obj: Any) -> str:
 # 書き写すと、cron ジョブ（プロファイルごとに焼き込まれる）とコードが食い違う。
 PROMPT_TEMPLATE = Path(__file__).resolve().parent / "templates" / "cron-prompt.md"
 DREAMS_JOB_SCRIPT = "dreams_diary_material.py"
+DREAMS_BRIDGE_SCRIPTS = (
+    "dreams_diary_material.py",
+    "dreams_diary_validate.py",
+    "dreams_diary_paths.py",
+)
 _PROMPT_TOKENS = dict(SECTIONS=lambda: "\n".join(SECTIONS), MIN_CHARS=lambda: str(MIN_CHARS_SOFT))
 _TOKEN = re.compile("{{([A-Z_]+)}}")
 
@@ -1616,4 +1622,234 @@ def apply_cron_prompt(
         "ok": all(row["verified"] for row in applied),
         "template_sha": _text_sha(rendered),
         "applied": applied,
+    }
+
+
+def _file_sha(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
+def _plugin_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def check_scripts(
+    profile: str,
+    profiles_root: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """プロファイルの scripts/ 内のブリッジスクリプトとリポジトリ原本を突き合わせる。"""
+    proot = Path(profiles_root) if profiles_root is not None else _profiles_root()
+    profile_home = proot / profile
+    scripts_dir = profile_home / "scripts"
+    src_root = Path(plugin_root) if plugin_root is not None else _plugin_root()
+    src_scripts = src_root / "scripts"
+
+    missing: List[str] = []
+    diff: List[str] = []
+    same: List[str] = []
+
+    for name in DREAMS_BRIDGE_SCRIPTS:
+        target = scripts_dir / name
+        src = src_scripts / name
+        if not target.exists():
+            missing.append(name)
+        elif _file_sha(target) != _file_sha(src):
+            diff.append(name)
+        else:
+            same.append(name)
+
+    if missing and len(missing) == len(DREAMS_BRIDGE_SCRIPTS):
+        status = "missing"
+    elif missing or diff:
+        status = "diff"
+    else:
+        status = "same"
+
+    return {
+        "profile": profile,
+        "status": status,
+        "same": same,
+        "diff": diff,
+        "missing": missing,
+    }
+
+
+def sync_scripts(
+    profile: str,
+    profiles_root: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """プロファイルの scripts/ へ原本ブリッジスクリプトをコピーして同期する。"""
+    proot = Path(profiles_root) if profiles_root is not None else _profiles_root()
+    profile_home = proot / profile
+    scripts_dir = profile_home / "scripts"
+    src_root = Path(plugin_root) if plugin_root is not None else _plugin_root()
+    src_scripts = src_root / "scripts"
+
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    copied: List[str] = []
+
+    for name in DREAMS_BRIDGE_SCRIPTS:
+        target = scripts_dir / name
+        src = src_scripts / name
+        if not target.exists() or _file_sha(target) != _file_sha(src):
+            shutil.copy2(src, target)
+            copied.append(name)
+
+    return {
+        "ok": True,
+        "profile": profile,
+        "copied": copied,
+    }
+
+
+def install_profile(
+    profile: str,
+    schedule: str = "30 23 * * *",
+    profiles_root: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    runner: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """新規プロファイルへの導入、または既存プロファイルへの再セットアップ（冪等）。"""
+    proot = Path(profiles_root) if profiles_root is not None else _profiles_root()
+    profile_home = proot / profile
+    profile_home.mkdir(parents=True, exist_ok=True)
+
+    src_root = Path(plugin_root) if plugin_root is not None else _plugin_root()
+    run = runner or _run_cron_edit
+
+    # 1. symlink plugins/dreams-diary
+    plugins_dir = profile_home / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    link = plugins_dir / "dreams-diary"
+    if link.is_symlink():
+        if link.resolve() != src_root.resolve():
+            link.unlink()
+            link.symlink_to(src_root.resolve())
+    elif not link.exists():
+        link.symlink_to(src_root.resolve())
+
+    # 2. sync scripts
+    sync_res = sync_scripts(profile, profiles_root=proot, plugin_root=src_root)
+
+    # 3. plugins enable
+    run(["hermes", "-p", profile, "plugins", "enable", "dreams-diary"])
+
+    # 4. cron job (check existing)
+    jobs_path = profile_home / "cron" / "jobs.json"
+    rendered = render_cron_prompt()
+
+    existing_jobs: List[Dict[str, Any]] = []
+    if jobs_path.exists():
+        try:
+            existing_jobs = _dreams_jobs(jobs_path)
+        except ValueError:
+            existing_jobs = []
+
+    if existing_jobs:
+        apply_res = apply_cron_prompt(profile, jobs_path=jobs_path, runner=run)
+        action = "updated"
+        ok = apply_res.get("ok", False)
+    else:
+        cmd = [
+            "hermes",
+            "-p",
+            profile,
+            "cron",
+            "create",
+            schedule,
+            "--name",
+            "dreams-diary",
+            "--script",
+            DREAMS_JOB_SCRIPT,
+            "--continuity",
+            rendered,
+        ]
+        outcome = run(cmd)
+        code = outcome[0] if isinstance(outcome, tuple) else outcome
+        action = "created"
+        ok = (code == 0)
+
+    return {
+        "ok": ok,
+        "profile": profile,
+        "action": action,
+        "scripts_copied": sync_res.get("copied", []),
+    }
+
+
+def sync_all(
+    check_only: bool = False,
+    profiles: Optional[List[str]] = None,
+    profiles_root: Optional[Path] = None,
+    plugin_root: Optional[Path] = None,
+    runner: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """全プロファイル（または指定プロファイル）の scripts および cron プロンプトを同期・点検する。"""
+    proot = Path(profiles_root) if profiles_root is not None else _profiles_root()
+    if profiles is None:
+        target_profiles = sorted(
+            item.name for item in proot.iterdir() if item.is_dir() and not item.name.startswith(".")
+        )
+    else:
+        target_profiles = list(dict.fromkeys(profiles))
+
+    results: List[Dict[str, Any]] = []
+    all_ok = True
+
+    for p in target_profiles:
+        scripts_info = check_scripts(p, profiles_root=proot, plugin_root=plugin_root)
+        jobs_path = proot / p / "cron" / "jobs.json"
+
+        prompt_state = "missing"
+        job_id = None
+        if jobs_path.exists():
+            try:
+                jobs = _dreams_jobs(jobs_path)
+                if jobs:
+                    job_id = jobs[0].get("id")
+                    rendered = render_cron_prompt()
+                    stored = jobs[0].get("prompt") or ""
+                    prompt_state = "same" if stored == rendered else "diff"
+            except ValueError:
+                prompt_state = "unreadable"
+
+        if check_only:
+            is_same = (scripts_info["status"] == "same" and prompt_state == "same")
+            if not is_same:
+                all_ok = False
+            results.append({
+                "profile": p,
+                "scripts": scripts_info,
+                "prompt": {"state": prompt_state, "job_id": job_id},
+            })
+        else:
+            sync_res = sync_scripts(p, profiles_root=proot, plugin_root=plugin_root)
+            apply_res = None
+            if prompt_state in ("diff", "same"):
+                apply_res = apply_cron_prompt(p, jobs_path=jobs_path, runner=runner)
+                p_ok = apply_res.get("ok", False)
+            elif prompt_state == "missing":
+                p_ok = True
+            else:
+                p_ok = False
+
+            if not p_ok or not sync_res.get("ok"):
+                all_ok = False
+
+            results.append({
+                "profile": p,
+                "scripts_copied": sync_res.get("copied", []),
+                "prompt_applied": apply_res,
+                "ok": p_ok,
+            })
+
+    return {
+        "ok": all_ok,
+        "check_only": check_only,
+        "profiles": results,
     }
