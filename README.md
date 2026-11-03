@@ -132,6 +132,44 @@ because they never match the diary filename and would otherwise drop out of the 
 遅れているプロファイルは
 `python3 cli.py --profile <name> index` で1コマンドで作り直せる。
 
+### What the material contains
+
+The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## 会話` →
+`## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
+
+- **前日の自己申告（未検証）** reads back only sections 5 (借りているもの) and 6 (明日の自分へ)
+  of the most recent earlier diary, capped at 600 characters, labelled with its filename and date
+  and the note that it is not a fact. Sections 1–4 are never copied; the diary body is not reused.
+- **ツールの失敗（原因は未確認）** lists tool results in the day's window that failed in a known
+  shape: `terminal` with a non-zero `exit_code` or a non-empty `error`; `patch` / `write_file`
+  with `success: false` or an `error`; `read_file` with `not_found: true`; any other tool with a
+  non-empty `error`. Each line is `- HH:MM tool — call summary → first line of the failure`
+  (summary from the matching assistant `tool_calls`: `command` for terminal, `path` otherwise),
+  capped at 15 items with `（ほか N 件）`, plus one count line per tool. No failures prints
+  `（失敗は記録されていない）`. A failure is not a mistake: grep misses and intended red TDD runs
+  land here, which is why the heading says the cause is unconfirmed.
+- **コミット** only shows commits whose changed files overlap files this profile successfully
+  `patch`ed or `write_file`d that day. Reads (`read_file`, `search_files`) and failed edits do not
+  count. Matching is absolute-path based after `Path.resolve()`. The section ends with
+  `ほかのコミット: N 件（自分が編集したファイルと重ならない）`, capped at 20 commits per repo with
+  `（ほか N 件）`. Zero edits prints `（自分が編集したファイルはない）`; a DB without the tool-call
+  columns falls back to every repo plus `（編集を特定できないため全リポジトリ）`. Known limits:
+  edits made through `terminal` (`sed`, heredocs, `git mv`) are invisible, a file touched by two
+  profiles the same day appears as "mine" in both packs, and a commit made on a later day never
+  appears in the edit day's pack. **A missing commit is not a missing day's work.**
+  The validator still resolves hashes against every repo; only the material is scoped.
+
+### Secret masking
+
+`collect_material` runs `redact_secrets` once over the assembled pack, before saving and before
+returning, so the file and the tool response always agree. The header prints `マスク: N 件`.
+Recognised shapes are `sk-...`, `ghp_...` / `github_pat_...`, `xox[abprs]-...`,
+`AKIA[0-9A-Z]{16}`, `AIza...`, `Authorization:` / `Bearer` tokens, `-----BEGIN ... PRIVATE KEY-----`
+blocks, and `(api_key|token|secret|password|passwd) <:|=|> value` with 8+ characters; each hit
+becomes `[REDACTED:<kind>]`. The same detector backs the validator's `possible_secret` warning.
+Limit: only known shapes. Free-form secrets and short values are not caught, and `_material/` is
+still written to disk (not storing it was rejected in Q3).
+
 ### Late gate (cron has no post-run hook)
 
 The cron `script` runs *before* the agent, so validation happens inside the same agent run. As a
@@ -204,6 +242,9 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
   what they said (`「〜と言っていた」`), never assert their inner state.
 - `too_short` / `too_long` (warn) — under 800 or over 3000 prose characters (frontmatter and
   headings excluded; measured by `_prose_chars` in `main.py`).
+- `possible_secret` (warn) — the diary's full text contains a known secret shape (the same
+  `redact_secrets` detector the material uses). `detail` names the kinds and counts only; the value
+  is never echoed. The diary body is not rewritten by the validator, and `ok` is unchanged.
 - `unresolved_hash` (error) — a hash written in commit context does not exist in any repo
   under `~/Dev/git`. The scan is recursive (depth 3), so nested layouts such as
   `~/Dev/git/<group>/<repo>/.git` are included; `DREAMS_REPOS` (colon-separated) pins the set
@@ -269,6 +310,27 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 パス移動はエラーにします。指定を捨てて別プロファイルへフォールバックすることはありません。
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。`--path FILE` で日記ファイルを
 直接指定できます（`-2` / `-3` の別名ファイルを検査するときに必要）。
+
+### 素材の内容と限界（v1.5）
+
+素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
+前日の日記から読み戻すのは第5・6節だけで、600字まで。事実ではなく未検証の自己申告として置きます。
+
+ツールの失敗は、既知の形（terminal の非0 `exit_code` / 空でない `error`、patch・write_file の
+`success:false` / `error`、read_file の `not_found:true`、その他の `error`）だけを拾い、1日15件まで。
+失敗は間違いの証明ではないので、原因は素材から読める範囲でだけ書きます。
+
+`## コミット` は、その日に自分が `patch` / `write_file` で成功裏に触れたファイルと重なるコミットだけ。
+読み取りと失敗した編集は数えません。20コミット/リポジトリで打ち切り、残りは
+`ほかのコミット: N 件` に回します。`state.db` が無い、または tool 呼び出しの列が無い DB では
+全リポジトリを出して注記します。**terminal 経由の編集・同日に別プロファイルが触ったファイル・
+編集日とコミット日がずれたコミットは見えません。コミットが無い＝仕事が無い、ではありません。**
+validator のハッシュ実在確認は従来どおり全リポジトリを探します（絞るのは素材だけ）。
+
+素材は保存・返却の前に既知形式の秘密情報を `[REDACTED:種別]` に置換し、ヘッダに `マスク: N 件` を出します。
+対象は `sk-` / `ghp_` / `github_pat_` / `xox[abprs]-` / `AKIA` / `AIza` / `Authorization:`・`Bearer` /
+秘密鍵ブロック / `api_key・token・secret・password・passwd` の8文字以上の値。自由文の秘密や短い値は
+取れません。`_material/` 自体は保存します。日記本文の検査は `possible_secret`（warn）で、値は出しません。
 
 ### 手動実行（ブリッジ）
 

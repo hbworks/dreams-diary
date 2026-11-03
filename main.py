@@ -48,6 +48,15 @@ INJECTED_PREFIXES = ("[IMPORTANT:", "[The user sent", "[System", "[SYSTEM")
 MAX_CHARS_SOFT = 3000
 MIN_CHARS_SOFT = 800
 
+# 素材の失敗・自己申告・コミット範囲（docs/SPEC-v1.5.md）
+FAIL_MAX_ITEMS = 15
+FAIL_SUMMARY_CHARS = 80
+FAIL_DETAIL_CHARS = 120
+SELF_REPORT_MAX_CHARS = 600
+COMMIT_MAX_PER_REPO = 20
+# 素材ヘッダの件数は redact_secrets の後に埋める（マスクの出口を1か所に保つ）。
+MASK_COUNT_TOKEN = "__DREAMS_MASK_COUNT__"
+
 # 日記ファイル名の唯一の定義。検査・遅延ゲート・監査・目次がそれぞれ別の正規表現を持つと、
 # `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
 DIARY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
@@ -176,6 +185,84 @@ def _fit(text: str, budget: int, notice: str) -> str:
 def _day_bounds(day: str) -> Tuple[float, float]:
     start = datetime.datetime.strptime(day, "%Y-%m-%d")
     return start.timestamp(), (start + datetime.timedelta(days=1)).timestamp()
+
+
+# ------------------------------------------------------------------- secrets
+
+# 形式が既知のものだけを対象にする。自由文の秘密や短い値は取れない（README に明記）。
+# 置換は `[REDACTED:<種別>]`。validator も同じ関数を使い、検出ルールを1か所に保つ。
+SECRET_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            re.S,
+        ),
+    ),
+    ("openai_key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}")),
+    ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}")),
+    ("slack_token", re.compile(r"xox[abprs]-[A-Za-z0-9-]{8,}")),
+    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("google_api_key", re.compile(r"AIza[0-9A-Za-z_-]{30,}")),
+    ("bearer", re.compile(r"(?i)\b(?:authorization\s*:\s*(?:bearer\s+)?|bearer\s+)[A-Za-z0-9._~+/=-]{8,}")),
+    (
+        "credential",
+        re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd)\s*[:=]\s*[^\s\"',;]{8,}"),
+    ),
+)
+
+
+def _secret_hits(text: str) -> List[Tuple[int, int, str]]:
+    """重なりの無い (start, end, 種別) を開始位置順で返す。
+
+    `password=sk-...` のように形式が重なる場合は、先に始まる（＝値全体を覆う）
+    マッチを優先する。同じ開始位置ならパターン定義順（秘密鍵が先）を優先する。
+    """
+    hits: List[Tuple[int, int, str]] = []
+    for order, (kind, pattern) in enumerate(SECRET_PATTERNS):
+        for match in pattern.finditer(text or ""):
+            hits.append((match.start(), match.end(), kind, order))
+    hits.sort(key=lambda hit: (hit[0], -hit[1], hit[3]))
+    chosen: List[Tuple[int, int, str]] = []
+    for start, end, kind, _ in hits:
+        if chosen and start < chosen[-1][1]:
+            continue
+        chosen.append((start, end, kind))
+    return chosen
+
+
+def redact_secrets(text: str) -> Tuple[str, Dict[str, int]]:
+    """既知形式の秘密情報を `[REDACTED:<種別>]` に置き換える。
+
+    返す counts は種別ごとの件数。素材の保存と返却はこの1回の結果を使う。
+    """
+    hits = _secret_hits(text)
+    if not hits:
+        return text, {}
+    counts: Dict[str, int] = collections.Counter(hit[2] for hit in hits)
+    out: List[str] = []
+    cursor = 0
+    for start, end, kind in hits:
+        out.append(text[cursor:start])
+        out.append(f"[REDACTED:{kind}]")
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out), dict(counts)
+
+
+def _secret_issues(text: str) -> List[Dict[str, str]]:
+    """日記本文の秘密情報検査（warn）。値そのものは detail に出さない。"""
+    _, counts = redact_secrets(text)
+    if not counts:
+        return []
+    detail = ", ".join(f"{kind} {count}件" for kind, count in sorted(counts.items()))
+    return [
+        _issue(
+            "warn",
+            "possible_secret",
+            f"既知形式の秘密情報らしき文字列がある: {detail}（合計 {sum(counts.values())} 件）。値はここに出さない。",
+        )
+    ]
 
 
 # ------------------------------------------------------------------ material
@@ -320,35 +407,303 @@ def discover_repos(base: Optional[str] = None, max_depth: Optional[int] = None) 
     return repos
 
 
-def _commits_material(day: str, repos: Optional[List[Path]] = None) -> str:
+def _state_message_rows(
+    day: str, home: Path, require_tool_columns: bool = False
+) -> Optional[List[sqlite3.Row]]:
+    """当日の messages を返す。DB が無い・読めないときは None。
+
+    新しい Hermes は tool_call_id / tool_calls を持つが、古い DB やテスト用の
+    最小スキーマには無い。列が無い場合は基本列だけで読み、要約は諦める。
+    ``require_tool_columns`` が真なら、列が無い DB は「特定できない」(None) にする。
+    """
+    db = state_db_path(home)
+    if not db.exists():
+        return None
+    t0, t1 = _day_bounds(day)
+    queries = (
+        "select role, content, tool_name, tool_call_id, tool_calls, timestamp "
+        "from messages where timestamp >= ? and timestamp < ? order by timestamp",
+        "select role, content, tool_name, null as tool_call_id, null as tool_calls, timestamp "
+        "from messages where timestamp >= ? and timestamp < ? order by timestamp",
+    )
+    for index, sql in enumerate(queries):
+        if index == 1 and require_tool_columns:
+            break
+        con = None
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+            con.row_factory = sqlite3.Row
+            return con.execute(sql, (t0, t1)).fetchall()
+        except sqlite3.Error:
+            continue
+        finally:
+            if con is not None:
+                con.close()
+    return None
+
+
+def _parse_json_object(text: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(text, str):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _first_line(text: Any, limit: int) -> str:
+    if not isinstance(text, str):
+        return ""
+    for line in text.splitlines():
+        if line.strip():
+            return _clip(line.strip(), limit)
+    return ""
+
+
+def _failure_detail(tool: str, payload: Dict[str, Any]) -> Optional[str]:
+    """失敗なら「失敗の1行目」、成功・未知の形なら None。"""
+    error = payload.get("error")
+    error_text = error.strip() if isinstance(error, str) else ""
+    if tool == "terminal":
+        code = payload.get("exit_code")
+        failed = (isinstance(code, int) and not isinstance(code, bool) and code != 0) or bool(error_text)
+        if not failed:
+            return None
+        return _first_line(error_text or payload.get("output"), FAIL_DETAIL_CHARS) or "（出力なし）"
+    if tool in ("patch", "write_file"):
+        if payload.get("success") is not False and not error_text:
+            return None
+        return _first_line(error_text or payload.get("diff"), FAIL_DETAIL_CHARS) or "（詳細なし）"
+    if tool == "read_file":
+        if payload.get("not_found") is not True:
+            return None
+        return _first_line(error_text or payload.get("content"), FAIL_DETAIL_CHARS) or "（内容なし）"
+    if not error_text:
+        return None
+    return _first_line(error_text, FAIL_DETAIL_CHARS) or "（詳細なし）"
+
+
+def _tool_call_summaries(rows: List[sqlite3.Row]) -> Dict[str, str]:
+    """tool_call_id → 呼び出しの要約（terminal は command、他は path）。"""
+    summaries: Dict[str, str] = {}
+    for row in rows:
+        if row["role"] != "assistant" or not row["tool_calls"]:
+            continue
+        try:
+            calls = json.loads(row["tool_calls"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("call_id") or call.get("id")
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            value = arguments.get("command") if name == "terminal" else arguments.get("path")
+            if call_id:
+                summaries[str(call_id)] = _clip(str(value or ""), FAIL_SUMMARY_CHARS)
+    return summaries
+
+
+def _failures_material(day: str, home: Path) -> str:
+    """当日のツール失敗（原因は未確認）。失敗＝間違いではない。"""
+    rows = _state_message_rows(day, home)
+    if rows is None:
+        return "（state.db が無いか読めないため失敗を確認できない）\n"
+    summaries = _tool_call_summaries(rows)
+    items: List[Tuple[str, str, str, str]] = []
+    for row in rows:
+        if row["role"] != "tool" or not row["tool_name"]:
+            continue
+        payload = _parse_json_object(row["content"])
+        if payload is None:
+            continue
+        detail = _failure_detail(row["tool_name"], payload)
+        if detail is None:
+            continue
+        when = datetime.datetime.fromtimestamp(row["timestamp"]).strftime("%H:%M")
+        summary = summaries.get(str(row["tool_call_id"] or ""), "")
+        items.append((when, row["tool_name"], summary, detail))
+
+    if not items:
+        return "（失敗は記録されていない）\n"
+    counts = collections.Counter(tool for _, tool, _, _ in items)
+    lines = ["tool 別: " + ", ".join(f"{tool} {count}件" for tool, count in counts.most_common())]
+    for when, tool, summary, detail in items[:FAIL_MAX_ITEMS]:
+        call = f"{summary} → " if summary else ""
+        lines.append(f"- {when} {tool} — {call}{detail}")
+    if len(items) > FAIL_MAX_ITEMS:
+        lines.append(f"- （ほか {len(items) - FAIL_MAX_ITEMS} 件）")
+    return "\n".join(lines) + "\n"
+
+
+def _section_text(text: str, heading: str) -> str:
+    """日記から見出し節の本文だけを取り出す（次の `## ` まで）。"""
+    match = re.search(
+        rf"^{re.escape(heading)}[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _self_report_material(day: str, home: Path) -> str:
+    """前日の第5・6節を、未検証の自己申告として読む（第1〜4節は入れない）。"""
+    try:
+        previous = _previous_diary(day, home)
+    except OSError:
+        previous = None
+    if previous is None:
+        return "（無し）\n"
+    try:
+        text = previous.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "（無し）\n"
+    match = DIARY_NAME.match(previous.name)
+    date = match.group(1) if match else ""
+    lines = [
+        f"- ファイル: {previous.name} / 日付: {date}",
+        "- 注記: 事実として引き継がない。今日の素材で裏が取れたものだけ「返した／まだ」と書く",
+    ]
+    for heading, label in ((SECTIONS[4], "第5節"), (SECTIONS[5], "第6節")):
+        body = _section_text(text, heading)
+        lines.append(f"{label}: {body if body else '（無し）'}")
+    return _fit("\n".join(lines) + "\n", SELF_REPORT_MAX_CHARS, "\n（600字で切った）\n")
+
+
+def _edited_files(day: str, home: Path) -> Optional[set]:
+    """当日 patch / write_file が成功したファイルの絶対パス集合。
+
+    None は「state.db が無い・読めないので特定できない」。空集合は「編集は0件」。
+    読み取りと失敗した編集は自分の仕事に数えない。
+    """
+    rows = _state_message_rows(day, home, require_tool_columns=True)
+    if rows is None:
+        return None
+    edited: set = set()
+    for row in rows:
+        if row["role"] != "tool" or row["tool_name"] not in ("patch", "write_file"):
+            continue
+        payload = _parse_json_object(row["content"])
+        if payload is None:
+            continue
+        if payload.get("success") is False:
+            continue
+        error = payload.get("error")
+        if isinstance(error, str) and error.strip():
+            continue
+        for key in ("files_modified", "resolved_path"):
+            value = payload.get(key)
+            values = [value] if isinstance(value, str) else value
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, str) or not item.strip():
+                    continue
+                try:
+                    edited.add(str(Path(item).expanduser().resolve()))
+                except (OSError, RuntimeError):
+                    edited.add(str(Path(item).expanduser()))
+    return edited
+
+
+def _git_commits(repo: Path, day: str) -> List[Dict[str, Any]]:
+    """当日のコミットをハッシュ・時刻・件名・変更ファイルで返す。"""
+    try:
+        log = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.quotePath=false",
+                "-C",
+                str(repo),
+                "log",
+                f"--since={day} 00:00",
+                f"--until={day} 23:59:59",
+                "--pretty=format:%x1e%h%x1f%ad%x1f%s",
+                "--date=format:%H:%M",
+                "--name-only",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    commits: List[Dict[str, Any]] = []
+    for chunk in log.split("\x1e"):
+        if not chunk.strip():
+            continue
+        header, _, rest = chunk.partition("\n")
+        parts = header.strip().split("\x1f")
+        if len(parts) != 3:
+            continue
+        files = [line.strip() for line in rest.splitlines() if line.strip()]
+        commits.append({"hash": parts[0], "time": parts[1], "subject": parts[2], "files": files})
+    return commits
+
+
+def _commit_is_mine(repo: Path, commit: Dict[str, Any], edited: set) -> bool:
+    for rel in commit["files"]:
+        try:
+            candidate = str(Path(repo, rel).resolve())
+        except (OSError, RuntimeError):
+            candidate = str(Path(repo, rel))
+        if candidate in edited:
+            return True
+    return False
+
+
+def _commits_material(
+    day: str, repos: Optional[List[Path]] = None, edited: Optional[set] = None
+) -> str:
+    """自分の仕事（編集したファイルと重なるコミット）だけを出す。
+
+    edited が None のときは編集を特定できないので、従来どおり全リポジトリを出して注記する。
+    """
     repos = repos if repos is not None else discover_repos()
     if not repos:
         return "（リポジトリが見つからない）\n"
-    blocks = []
+    blocks: List[str] = []
+    others = 0
     for repo in repos:
-        try:
-            log = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo),
-                    "log",
-                    f"--since={day} 00:00",
-                    f"--until={day} 23:59:59",
-                    "--pretty=format:%h %ad %s",
-                    "--date=format:%H:%M",
-                    "--stat",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            ).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
+        commits = _git_commits(repo, day)
+        if edited is None:
+            mine = commits
+        else:
+            mine = [c for c in commits if _commit_is_mine(repo, c, edited)]
+            others += len(commits) - len(mine)
+        if not mine:
             continue
-        if log:
-            lines = [ln for ln in log.splitlines() if ln.strip()][:40]
-            blocks.append(f"[{repo.name}]\n" + "\n".join(lines))
-    return ("\n\n".join(blocks) + "\n") if blocks else f"（{day} のコミットは無い）\n"
+        lines = [f"[{repo.name}]"]
+        for commit in mine[:COMMIT_MAX_PER_REPO]:
+            lines.append(f"{commit['hash']} {commit['time']} {commit['subject']}")
+            lines.extend(f"  {name}" for name in commit["files"])
+        if len(mine) > COMMIT_MAX_PER_REPO:
+            lines.append(f"（ほか {len(mine) - COMMIT_MAX_PER_REPO} 件）")
+        blocks.append("\n".join(lines))
+
+    out: List[str] = []
+    if edited is not None and not edited:
+        out.append("（自分が編集したファイルはない）")
+    elif not blocks:
+        out.append(
+            "（この日のコミットは無い）" if edited is None else "（自分が編集したファイルと重なるコミットは無い）"
+        )
+    out.extend(blocks)
+    if edited is None:
+        out.append("（編集を特定できないため全リポジトリ）")
+    out.append(f"ほかのコミット: {others} 件（自分が編集したファイルと重ならない）")
+    return "\n".join(out) + "\n"
 
 
 def _previous_diary(day: str, home: Path) -> Optional[Path]:
@@ -422,19 +777,42 @@ def collect_material(
     header = (
         f"# 夢日記の素材 — {day}\n\n"
         f"生成: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')} / プロファイル: {home.name}\n"
+        f"マスク: {MASK_COUNT_TOKEN} 件\n"
         f"日記ファイル: {diary} （{'あり（上書き禁止）' if diary.exists() else 'なし'}）\n\n"
         # post-run ゲートの代わり: 前回の日記を検査し、未通過なら先頭で知らせる。
         f"## 前回の日記の検証\n{_gate_material(day, home, repos)}\n"
     )
+    self_report = _self_report_material(day, home)
     conversation = _sessions_material(day, home)
-    commits = _commits_material(day, repos)
+    failures = _failures_material(day, home)
+    edited = _edited_files(day, home)
+    commits = _commits_material(day, repos, edited)
     memory = _memory_material(day, home)
+    self_head = "## 前日の自己申告（未検証）\n"
+    conv_head = "## 会話\n"
+    fail_head = "\n## ツールの失敗（原因は未確認）\n"
+    commit_head = "\n## コミット\n"
+    mem_head = "\n## この日 memory に追加された項目\n"
     body_full = (
         header
-        + f"## 会話\n{conversation}\n"
-        + f"## コミット\n{commits}\n"
-        + f"## この日 memory に追加された項目\n{memory}\n"
+        + self_head
+        + self_report
+        + conv_head
+        + conversation
+        + fail_head
+        + failures
+        + commit_head
+        + commits
+        + mem_head
+        + memory
     )
+
+    # 保存と返却の出口を1か所にする。ここを通した本文だけをファイルにも返り値にも使う。
+    body_full, mask_counts = redact_secrets(body_full)
+    mask_line = str(sum(mask_counts.values()))
+    body_full = body_full.replace(MASK_COUNT_TOKEN, mask_line)
+    # 切り詰め経路は header から組み直すので、header 側も同じ値にしておく。
+    header = header.replace(MASK_COUNT_TOKEN, mask_line)
 
     # 全文は必ず _material 側へ保存する。ここを切り詰めると「全文はそちらを見る」
     # という案内が嘘になり、根拠の再確認ができなくなる。
@@ -477,10 +855,14 @@ def collect_material(
                 f"max_chars は切り詰め注記を含めるため {len(notice)} 字以上が必要です"
             )
         content_budget = max_chars - len(notice)
-        conv_head = "## 会話\n"
-        commit_head = "\n## コミット\n"
-        mem_head = "\n## この日 memory に追加された項目\n"
-        fixed = len(header) + len(conv_head) + len(commit_head) + len(mem_head)
+        fixed = (
+            len(header)
+            + len(self_head)
+            + len(conv_head)
+            + len(fail_head)
+            + len(commit_head)
+            + len(mem_head)
+        )
         available = content_budget - fixed
         if available < TRUNC_MIN_AVAILABLE:
             body = body_full[:content_budget] + notice
@@ -495,11 +877,18 @@ def collect_material(
             )
             mem_budget = min(len(memory), max(0, min(MEMORY_CEILING, ev_budget)))
             commit_budget = max(0, ev_budget - mem_budget)
-            conv_budget = max(0, available - ev_budget)
+            rest = available - ev_budget
+            fail_budget = min(len(failures), max(0, rest // 2))
+            self_budget = min(len(self_report), max(0, rest - fail_budget))
+            conv_budget = max(0, rest - fail_budget - self_budget)
             body = (
                 header
+                + self_head
+                + _fit(self_report, self_budget, "\n（前日の自己申告は上限で切り詰めた）\n")
                 + conv_head
                 + _fit(conversation, conv_budget, "\n（会話は上限で切り詰めた）\n")
+                + fail_head
+                + _fit(failures, fail_budget, "\n（ツールの失敗は上限で切り詰めた）\n")
                 + commit_head
                 + _fit(commits, commit_budget, "\n（コミットは上限で切り詰めた）\n")
                 + mem_head
@@ -906,6 +1295,9 @@ def validate_diary(
 
     repos = repos if repos is not None else discover_repos()
     issues += _hash_issues(text, repos)
+
+    # 値そのものは出さない。自動マスクもしない（本文を機械が書き換えない原則）。
+    issues += _secret_issues(text)
 
     errors = [i for i in issues if i["level"] == "error"]
     return {
