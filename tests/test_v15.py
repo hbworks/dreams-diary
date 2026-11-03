@@ -483,5 +483,61 @@ class PossibleSecretValidationTests(unittest.TestCase):
         self.assertNotIn("possible_secret", [i["code"] for i in result["issues"]])
 
 
+class TimePresenceValidationTests(unittest.TestCase):
+    """sessions がある日は本文に時刻（HH:MM）を1つ以上書く。
+
+    素材のセッション見出しは `HH:MM–HH:MM` を持つので、時刻を落とした日記は
+    どの作業の話か追えなくなる。error ではなく warn に留める（古い日記を壊さない）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.home = make_profile(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _validate(self, body: str):
+        path = self.home / "dreams" / f"{DAY}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return core.validate_diary(path=str(path), home=self.home, repos=[])
+
+    def _codes(self, result):
+        return [i["code"] for i in result["issues"]]
+
+    def test_session_diary_without_time_warns(self):
+        result = self._validate(_good_diary())
+        self.assertTrue(result["ok"], result)
+        self.assertIn("time_absent", self._codes(result))
+
+    def test_session_diary_with_time_does_not_warn(self):
+        body = _good_diary().replace("本文。検証用の文章をここに置く。", "12:27 から 13:39 まで調査した。", 1)
+        result = self._validate(body)
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("time_absent", self._codes(result))
+
+    def test_full_width_colon_counts_as_a_time(self):
+        body = _good_diary().replace("本文。検証用の文章をここに置く。", "12：27 から調査した。", 1)
+        result = self._validate(body)
+        self.assertNotIn("time_absent", self._codes(result))
+
+    def test_diary_with_no_sessions_is_exempt(self):
+        result = self._validate(_good_diary().replace("sessions: 1", "sessions: 0", 1))
+        self.assertNotIn("time_absent", self._codes(result))
+
+    def test_time_only_in_frontmatter_does_not_count(self):
+        body = _good_diary().replace("author: '@tester'", "author: '@tester 12:27'", 1)
+        result = self._validate(body)
+        self.assertIn("time_absent", self._codes(result))
+
+    def test_detail_names_the_session_count(self):
+        result = self._validate(_good_diary())
+        warn = [i for i in result["issues"] if i["code"] == "time_absent"]
+        self.assertTrue(warn, result)
+        self.assertIn("1", warn[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

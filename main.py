@@ -48,6 +48,8 @@ MAX_USER_MSGS_PER_SESSION = 12
 INJECTED_PREFIXES = ("[IMPORTANT:", "[The user sent", "[System", "[SYSTEM")
 MAX_CHARS_SOFT = 3000
 MIN_CHARS_SOFT = 800
+# 本文に時刻が1つも無い日記を検出するための形。素材のセッション見出しは HH:MM–HH:MM を持つ。
+TIME_PATTERN = re.compile(r"(?:[01]?\d|2[0-3])[:：][0-5]\d")
 
 # 素材の失敗・自己申告・コミット範囲（docs/SPEC-v1.5.md）
 FAIL_MAX_ITEMS = 15
@@ -1303,6 +1305,36 @@ def _length_issues(text: str) -> Tuple[int, List[Dict[str, str]]]:
     return chars, issues
 
 
+def _body_text(text: str) -> str:
+    """frontmatter を除いた本文。時刻の有無は本文だけで判定する。"""
+    lines = text.splitlines()
+    fields = _frontmatter_lines(text)
+    if fields is None:
+        return text
+    return "\n".join(lines[len(fields) + 2 :])
+
+
+def _time_issues(text: str) -> List[Dict[str, str]]:
+    """セッションがある日の本文に時刻が1つも無いことを warn する。
+
+    素材のセッション見出しは `HH:MM–HH:MM` を持つ。時刻を落とすと「Nセッション」と
+    書いても、どの作業の話か後から追えなくなる。古い日記を壊さないよう error にはしない。
+    """
+    sessions = _unquote_scalar(_frontmatter_fields(text).get("sessions", ""))
+    if not re.fullmatch(r"\d+", sessions) or int(sessions) < 1:
+        return []
+    if TIME_PATTERN.search(_body_text(text)):
+        return []
+    return [
+        _issue(
+            "warn",
+            "time_absent",
+            f"frontmatter は sessions: {int(sessions)} だが本文に時刻（HH:MM）が1つも無い。"
+            "素材のセッション見出しの開始・終了時刻を第1節に書くと、どの作業の話か追える。",
+        )
+    ]
+
+
 def _hash_issues(text: str, repos: List[Path]) -> List[Dict[str, str]]:
     """コミット文脈のハッシュがローカルに実在するか。外部ハッシュは warn に留める。"""
     unresolved: List[str] = []
@@ -1352,6 +1384,8 @@ def validate_diary(
 
     body_chars, length_issues = _length_issues(text)
     issues += length_issues
+
+    issues += _time_issues(text)
 
     repos = repos if repos is not None else discover_repos()
     issues += _hash_issues(text, repos)

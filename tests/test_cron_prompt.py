@@ -63,6 +63,11 @@ class RenderTests(unittest.TestCase):
             self.assertNotIn(heading, raw, f"見出しが散文へ再重複している: {heading}")
         self.assertNotIn("800", raw, "字数の下限が散文へ再重複している")
 
+    def test_prompt_requires_session_times(self):
+        text = core.render_cron_prompt()
+        self.assertIn("HH:MM", text)
+        self.assertIn("セッション", text)
+
     def test_missing_token_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "prompt.md"

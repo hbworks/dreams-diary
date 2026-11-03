@@ -266,6 +266,10 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
 - `possible_secret` (warn) — the diary's full text contains a known secret shape (the same
   `redact_secrets` detector the material uses). `detail` names the kinds and counts only; the value
   is never echoed. The diary body is not rewritten by the validator, and `ok` is unchanged.
+- `time_absent` (warn) — frontmatter says `sessions: 1` or more but the body (frontmatter
+  excluded) contains no time at all. Material session headings always carry `HH:MM–HH:MM`, so a
+  diary that keeps the count and drops the times cannot be traced to a specific piece of work.
+  Both `HH:MM` and the full-width `HH：MM` count. `ok` is unchanged.
 - `unresolved_hash` (error) — a hash written in commit context does not exist in any repo
   under `~/Dev/git`. The scan is recursive (depth 3), so nested layouts such as
   `~/Dev/git/<group>/<repo>/.git` are included; `DREAMS_REPOS` (colon-separated) pins the set
