@@ -76,6 +76,26 @@ to copy verbatim. Keep the one-cron-per-profile convention unless you intentiona
 `python3 cli.py material [YYYY-MM-DD]` prints and saves a material pack.
 `python3 cli.py validate [YYYY-MM-DD]` returns non-zero when the canonical diary is missing or has errors; use it for manual checks or pipelines, not as a cron `script` outside the profile's `scripts/`.
 
+### One source for the prompt
+
+`templates/cron-prompt.md` holds the prose; the six headings and the length floor are injected from
+`main.py` (`SECTIONS`, `MIN_CHARS_SOFT`) through `{{SECTIONS}}` / `{{MIN_CHARS}}`. Do not write either
+into the prose: each cron job stores its own copy of the rendered text, so a duplicated number goes
+stale in one copy at a time. Lines starting with `<!--` are editor notes and are stripped on render.
+
+A job keeps the prompt it was created with, so editing the template changes nothing until it is
+re-applied. Jobs are identified by their `script` (`dreams_diary_material.py`), not by name — the
+research job is called `muse-dreams-diary`:
+
+```sh
+python3 cli.py prompt                             # render to stdout
+python3 cli.py prompt --check                     # stored vs rendered (read-only; exit 1 on drift)
+python3 cli.py prompt --apply --profile research  # rewrite, then read back and verify
+```
+
+`--apply` takes one `--profile` per call and never expands to every profile; it re-reads
+`cron/jobs.json` after the edit and reports `verified: false` when the stored text did not change.
+
 Every CLI command accepts `--profile <name>` (or `-p`). Without it, the CLI resolves the home
 from Hermes' context-local override, then `HERMES_HOME`, then `HERMES_PROFILE`, and only then
 `~/.hermes/active_profile` — a global pointer to whichever profile was last used. When it has to
@@ -151,7 +171,8 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
 - `missing_section` (error) — one of the six headings is absent.
 - `second_person` (error) — `あなた` appears. Refer to the human as `ユーザー`, quote or report
   what they said (`「〜と言っていた」`), never assert their inner state.
-- `too_short` / `too_long` (warn) — under 300 or over 3000 characters (whitespace excluded).
+- `too_short` / `too_long` (warn) — under 800 or over 3000 prose characters (frontmatter and
+  headings excluded; measured by `_prose_chars` in `main.py`).
 - `unresolved_hash` (error) — a hash written in commit context does not exist in any repo
   under `~/Dev/git`. The scan is recursive (depth 3), so nested layouts such as
   `~/Dev/git/<group>/<repo>/.git` are included; `DREAMS_REPOS` (colon-separated) pins the set
@@ -195,6 +216,12 @@ cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` �
 
 共通 cron プロンプトは `templates/cron-prompt.md`、任意の声の記入用ひな形は
 `templates/persona.md` です。枠だけを共有し、内容はプロフィールごとに書き分けます。
+見出しと字数の下限は `main.py` の `SECTIONS` / `MIN_CHARS_SOFT` から `{{SECTIONS}}` /
+`{{MIN_CHARS}}` として注入されるので、散文側に書き写さないでください。ジョブはプロンプトを
+自分で保持するため、テンプレートを直しただけでは届きません。`python3 cli.py prompt --check` で
+差分（読み取りのみ、差分があれば exit 1）、`python3 cli.py prompt --apply --profile <p>` で
+再適用します。対象は job 名ではなく `script` で同定し、書き込み後に `jobs.json` を読み直して
+一致を確認します（`--apply` は明示列挙のみ）。
 cron では pre-run 素材にある `日記ファイル:` の絶対パスを使い、`dreams_write` や date のみの
 `dreams_material` は呼びません。Cron worker の tool home が root home に解決される場合があるため、
 `dreams_validate` には必ず生成したファイルの `path` を渡します。

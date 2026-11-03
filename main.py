@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -812,3 +813,144 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
 
 def json_dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------- cron prompt
+
+# 文面は templates/cron-prompt.md、値はこのファイルの定数。プロンプトに数字や見出しを
+# 書き写すと、cron ジョブ（プロファイルごとに焼き込まれる）とコードが食い違う。
+PROMPT_TEMPLATE = Path(__file__).resolve().parent / "templates" / "cron-prompt.md"
+DREAMS_JOB_SCRIPT = "dreams_diary_material.py"
+_PROMPT_TOKENS = dict(SECTIONS=lambda: "\n".join(SECTIONS), MIN_CHARS=lambda: str(MIN_CHARS_SOFT))
+_TOKEN = re.compile("{{([A-Z_]+)}}")
+
+
+def _text_sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def render_cron_prompt(template_path: Optional[Path] = None) -> str:
+    """テンプレートに定数を注入する。未知トークンと欠けたトークンは握り潰さない。
+
+    テンプレート内の `<!-- ... -->` 行は編集者向けの注記なので、描画結果には含めない。
+    """
+    path = Path(template_path) if template_path is not None else PROMPT_TEMPLATE
+    raw = path.read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in raw.splitlines() if not line.lstrip().startswith("<!--")
+    )
+    if raw.endswith("\n"):
+        body += "\n"
+    unknown = sorted(set(_TOKEN.findall(body)) - set(_PROMPT_TOKENS))
+    if unknown:
+        raise ValueError(f"未知のトークン: {unknown} ({path})")
+    missing = [name for name in _PROMPT_TOKENS if "{{" + name + "}}" not in body]
+    if missing:
+        raise ValueError(f"テンプレートにトークンがありません: {missing} ({path})")
+    rendered = body
+    for name, value in _PROMPT_TOKENS.items():
+        rendered = rendered.replace("{{" + name + "}}", value())
+    return rendered
+
+
+def _profiles_root() -> Path:
+    override = os.environ.get("DREAMS_PROFILES_ROOT")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hermes" / "profiles"
+
+
+def _dreams_jobs(jobs_path: Path) -> List[Dict[str, Any]]:
+    """job 名ではなく script で同定する（プロファイルごとに名前が違うため）。"""
+    try:
+        data = json.loads(jobs_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    jobs = data.get("jobs", []) if isinstance(data, dict) else []
+    return [job for job in jobs if Path(str(job.get("script") or "")).name == DREAMS_JOB_SCRIPT]
+
+
+def _jobs_files(root: Path) -> List[Tuple[str, Path]]:
+    files: List[Tuple[str, Path]] = []
+    root_jobs = root.parent / "cron" / "jobs.json"
+    if root_jobs.exists():
+        files.append(("(default)", root_jobs))
+    if not root.is_dir():
+        return files
+    for home in sorted(item for item in root.iterdir() if item.is_dir()):
+        jobs_path = home / "cron" / "jobs.json"
+        if jobs_path.exists():
+            files.append((home.name, jobs_path))
+    return files
+
+
+def check_cron_prompt(
+    template_path: Optional[Path] = None, profiles_root: Optional[Path] = None
+) -> Dict[str, Any]:
+    """各プロファイルの保存済みプロンプトを描画結果と突き合わせる（読み取り専用）。"""
+    rendered = render_cron_prompt(template_path)
+    sha = _text_sha(rendered)
+    root = Path(profiles_root) if profiles_root is not None else _profiles_root()
+    rows: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for profile, jobs_path in _jobs_files(root):
+        jobs = _dreams_jobs(jobs_path)
+        if not jobs:
+            missing.append(profile)
+            continue
+        for job in jobs:
+            stored = job.get("prompt") or ""
+            state = "same" if stored == rendered else ("no_prompt" if not stored else "diff")
+            rows.append(
+                {
+                    "profile": profile,
+                    "job_id": job.get("id"),
+                    "name": job.get("name"),
+                    "chars": len(stored),
+                    "stored_sha": _text_sha(stored),
+                    "state": state,
+                }
+            )
+    return {
+        "ok": all(row["state"] == "same" for row in rows),
+        "template_sha": sha,
+        "template_chars": len(rendered),
+        "jobs": rows,
+        "missing_profiles": missing,
+    }
+
+
+def apply_cron_prompt(
+    profile: str,
+    template_path: Optional[Path] = None,
+    jobs_path: Optional[Path] = None,
+    runner: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """保存済みプロンプトを描画結果で置き換え、書き込み後に読み直して検証する。"""
+    rendered = render_cron_prompt(template_path)
+    path = Path(jobs_path) if jobs_path is not None else _profiles_root() / profile / "cron" / "jobs.json"
+    if not path.exists():
+        return {"ok": False, "error": f"jobs.json がありません: {path}", "applied": []}
+    jobs = _dreams_jobs(path)
+    if not jobs:
+        return {"ok": False, "error": f"{profile} に dreams ジョブがありません", "applied": []}
+
+    run = runner or (
+        lambda cmd: subprocess.run(cmd, capture_output=True, text=True).returncode
+    )
+    applied: List[Dict[str, Any]] = []
+    for job in jobs:
+        job_id = job.get("id") or ""
+        code = run(["hermes", "-p", profile, "cron", "edit", job_id, "--prompt", rendered])
+        applied.append({"job_id": job_id, "name": job.get("name"), "exit_code": code})
+
+    stored = {row.get("id"): (row.get("prompt") or "") for row in _dreams_jobs(path)}
+    for row in applied:
+        current = stored.get(row["job_id"])
+        row["chars"] = len(current or "")
+        row["verified"] = current == rendered
+    return {
+        "ok": all(row["verified"] for row in applied),
+        "template_sha": _text_sha(rendered),
+        "applied": applied,
+    }
