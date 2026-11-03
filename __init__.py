@@ -118,6 +118,18 @@ def _validate_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
 
 
 def _index_handler(args: Dict[str, Any], home=None, **_kw: Any) -> str:
+    # cron worker ではツールの home が root（~/.hermes）へ解決されることがある。そのまま
+    # 書き込むと別ディレクトリに INDEX を作るので、プロファイルを特定できないときは断る。
+    if core.is_root_home(home):
+        return core.json_dumps(
+            {
+                "ok": False,
+                "error": (
+                    f"プロファイルを特定できない home が登録されている: {home}。"
+                    "INDEX は書かず、`python3 cli.py --profile <name> index` で再生成する。"
+                ),
+            }
+        )
     return core.json_dumps(core.build_index(home=home))
 
 

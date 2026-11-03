@@ -43,6 +43,12 @@ MIN_CHARS_SOFT = 800
 # `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
 DIARY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
 
+# 素材の切り詰め配分。会話から削り、根拠（コミット・memory）に最低限の枠を残す。
+TRUNC_MIN_AVAILABLE = 100
+EVIDENCE_SHARE = 0.4
+EVIDENCE_FLOOR = 300
+MEMORY_CEILING = 400
+
 
 # ---------------------------------------------------------------- profile paths
 
@@ -129,6 +135,11 @@ def _valid_date(day: Optional[str]) -> str:
 def _clip(text: str, limit: int) -> str:
     text = re.sub(r"\s+", " ", text or "").strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _fit(text: str, budget: int, notice: str) -> str:
+    """予算に収まらなければ切り詰め、切ったことを明示する（黙って欠落させない）。"""
+    return text if len(text) <= budget else text[:budget] + notice
 
 
 def _day_bounds(day: str) -> Tuple[float, float]:
@@ -378,37 +389,24 @@ def collect_material(
         fixed = len(header) + len(conv_head) + len(commit_head) + len(mem_head)
         note = f"（素材は上限 {max_chars} 字に合わせて切り詰めた。全文: {material_path}）\n"
         available = max_chars - fixed - len(note)
-        if available < 100:
+        if available < TRUNC_MIN_AVAILABLE:
             body = body_full[: max(0, max_chars)] + "\n（素材は上限で切り詰めた）\n"
         else:
             # 根拠（コミット・memory）に最低限の枠を確保してから、残りを会話に回す。
             # 会話が長い日に根拠節ごと消えると、日記の裏付けが失われる。
             ev_body = len(commits) + len(memory)
-            ev_budget = min(ev_body, max(300, int(available * 0.4)))
-            mem_budget = min(len(memory), max(0, min(400, ev_budget)))
+            ev_budget = min(ev_body, max(EVIDENCE_FLOOR, int(available * EVIDENCE_SHARE)))
+            mem_budget = min(len(memory), max(0, min(MEMORY_CEILING, ev_budget)))
             commit_budget = max(0, ev_budget - mem_budget)
             conv_budget = max(0, available - ev_budget)
-            conv_text = (
-                conversation
-                if len(conversation) <= conv_budget
-                else conversation[:conv_budget] + "\n（会話は上限で切り詰めた）\n"
-            )
-            commit_text = (
-                commits
-                if len(commits) <= commit_budget
-                else commits[:commit_budget] + "\n（コミットは上限で切り詰めた）\n"
-            )
-            memory_text = (
-                memory if len(memory) <= mem_budget else memory[:mem_budget] + "\n"
-            )
             body = (
                 header
                 + conv_head
-                + conv_text
+                + _fit(conversation, conv_budget, "\n（会話は上限で切り詰めた）\n")
                 + commit_head
-                + commit_text
+                + _fit(commits, commit_budget, "\n（コミットは上限で切り詰めた）\n")
                 + mem_head
-                + memory_text
+                + _fit(memory, mem_budget, "\n")
                 + note
             )
     return {
@@ -428,12 +426,18 @@ def collect_material(
 # ------------------------------------------------------------------- writing
 
 
+def is_root_home(home: Optional[Path] = None) -> bool:
+    """プロファイルの home ではなく root（`~/.hermes`）を指しているか。"""
+    target = home or resolve_profile_home()
+    name = target.name.strip()
+    return not name or name.startswith(".")
+
+
 def _author_name(home: Path) -> str:
     """root home では `.hermes` のような名前になるので、プロファイル名へ逃がす。"""
-    name = home.name.strip()
-    if name.startswith(".") or not name:
+    if is_root_home(home):
         return os.environ.get("HERMES_PROFILE", "").strip() or "agent"
-    return name
+    return home.name.strip()
 
 
 def write_skeleton(
@@ -584,6 +588,108 @@ def _resolve_hash(h: str, repos: List[Path]) -> Optional[str]:
     return None
 
 
+def _issue(level: str, code: str, detail: str) -> Dict[str, str]:
+    return {"level": level, "code": code, "detail": detail}
+
+
+def _frontmatter_issues(text: str, target: Path) -> List[Dict[str, str]]:
+    """frontmatter の有無・必須項目・date の形式とファイル名一致。"""
+    lines = _frontmatter_lines(text)
+    if lines is None:
+        return [_issue("error", "missing_frontmatter", "日付などのメタデータを含む YAML frontmatter が必要。")]
+    fields = _frontmatter_fields(text)
+    required = ("date", "author", "sessions", "messages", "commit")
+    missing = [key for key in required if key not in fields]
+    if missing:
+        return [_issue("error", "missing_frontmatter_field", "必須フィールドがない: " + ", ".join(missing))]
+
+    def scalar(key: str) -> str:
+        value = fields[key].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].strip()
+        return value
+
+    issues: List[Dict[str, str]] = []
+    raw_date = scalar("date")
+    try:
+        frontmatter_date = _valid_date(raw_date)
+    except ValueError:
+        issues.append(
+            _issue("error", "invalid_frontmatter_date", f"frontmatter の date が YYYY-MM-DD ではない: {raw_date!r}")
+        )
+    else:
+        filename_date = DIARY_NAME.match(target.name)
+        if filename_date and frontmatter_date != filename_date.group(1):
+            issues.append(
+                _issue(
+                    "error",
+                    "frontmatter_date_mismatch",
+                    f"frontmatter の date {frontmatter_date} がファイル名の日付 {filename_date.group(1)} と一致しない。",
+                )
+            )
+
+    invalid = [key for key in ("author", "sessions", "messages") if not scalar(key)]
+    invalid.extend(
+        key for key in ("sessions", "messages") if scalar(key) and not re.fullmatch(r"\d+", scalar(key))
+    )
+    has_commit_list = any(re.match(r"^\s+-\s+\S", line) for line in lines)
+    if not scalar("commit") and not has_commit_list:
+        invalid.append("commit")
+    if invalid:
+        issues.append(
+            _issue("error", "invalid_frontmatter_field", "値が空または形式不正: " + ", ".join(sorted(set(invalid))))
+        )
+    return issues
+
+
+def _section_issues(text: str) -> List[Dict[str, str]]:
+    """6節の欠落と二人称の混入。"""
+    issues = [_issue("error", "missing_section", section) for section in SECTIONS if section not in text]
+    if "あなた" in text:
+        issues.append(_issue("error", "second_person", "「あなた」は禁止。三人称『ユーザー』＋引用か伝聞で書く。"))
+    return issues
+
+
+def _length_issues(text: str) -> Tuple[int, List[Dict[str, str]]]:
+    """本文の字数と、ソフトな上下限。"""
+    chars = _prose_chars(text)
+    issues: List[Dict[str, str]] = []
+    if chars < MIN_CHARS_SOFT:
+        issues.append(_issue("warn", "too_short", f"本文 {chars} 字（{MIN_CHARS_SOFT} 字未満）"))
+    if chars > MAX_CHARS_SOFT:
+        issues.append(_issue("warn", "too_long", f"本文 {chars} 字（{MAX_CHARS_SOFT} 字超）"))
+    return chars, issues
+
+
+def _hash_issues(text: str, repos: List[Path]) -> List[Dict[str, str]]:
+    """コミット文脈のハッシュがローカルに実在するか。外部ハッシュは warn に留める。"""
+    unresolved: List[str] = []
+    external: List[str] = []
+    for h in sorted(set(_commit_candidates(text))):
+        if _resolve_hash(h, repos) is not None:
+            continue
+        line = next((ln for ln in text.splitlines() if h in ln), "")
+        (external if EXTERNAL_CONTEXT.search(line) else unresolved).append(h)
+
+    issues = [
+        _issue(
+            "error",
+            "unresolved_hash",
+            f"{h} はコミットとして書かれているが ~/Dev/git 配下のどのリポジトリにも存在しない。捏造の疑い。",
+        )
+        for h in unresolved
+    ]
+    issues.extend(
+        _issue(
+            "warn",
+            "unverified_external_hash",
+            f"{h} は外部（upstream 等）のコミットなのでローカルでは検証できない。出典を明記しているか確認。",
+        )
+        for h in external
+    )
+    return issues
+
+
 def validate_diary(
     day: Optional[str] = None,
     path: Optional[str] = None,
@@ -596,140 +702,15 @@ def validate_diary(
         return {"ok": False, "path": str(target), "errors": ["file_missing"], "issues": []}
     text = target.read_text(encoding="utf-8")
 
-    issues: List[Dict[str, str]] = []
-    frontmatter_lines = _frontmatter_lines(text)
-    has_frontmatter = frontmatter_lines is not None
-    if not has_frontmatter:
-        issues.append(
-            {
-                "level": "error",
-                "code": "missing_frontmatter",
-                "detail": "日付などのメタデータを含む YAML frontmatter が必要。",
-            }
-        )
-    else:
-        frontmatter_fields = _frontmatter_fields(text)
-        required_fields = ("date", "author", "sessions", "messages", "commit")
-        missing_fields = [key for key in required_fields if key not in frontmatter_fields]
-        if missing_fields:
-            issues.append(
-                {
-                    "level": "error",
-                    "code": "missing_frontmatter_field",
-                    "detail": "必須フィールドがない: " + ", ".join(missing_fields),
-                }
-            )
-        else:
-            def scalar(key: str) -> str:
-                value = frontmatter_fields[key].strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1].strip()
-                return value
+    issues = _frontmatter_issues(text, target)
 
-            frontmatter_date = scalar("date")
-            try:
-                frontmatter_date = _valid_date(frontmatter_date)
-            except ValueError:
-                issues.append(
-                    {
-                        "level": "error",
-                        "code": "invalid_frontmatter_date",
-                        "detail": f"frontmatter の date が YYYY-MM-DD ではない: {frontmatter_date!r}",
-                    }
-                )
-            else:
-                filename_date = DIARY_NAME.match(target.name)
-                if filename_date and frontmatter_date != filename_date.group(1):
-                    issues.append(
-                        {
-                            "level": "error",
-                            "code": "frontmatter_date_mismatch",
-                            "detail": f"frontmatter の date {frontmatter_date} がファイル名の日付 {filename_date.group(1)} と一致しない。",
-                        }
-                    )
+    issues += _section_issues(text)
 
-            invalid_fields = [
-                key
-                for key in ("author", "sessions", "messages")
-                if not scalar(key)
-            ]
-            invalid_fields.extend(
-                key
-                for key in ("sessions", "messages")
-                if scalar(key) and not re.fullmatch(r"\d+", scalar(key))
-            )
-            has_commit_list = any(
-                re.match(r"^\s+-\s+\S", line) for line in frontmatter_lines
-            )
-            if not scalar("commit") and not has_commit_list:
-                invalid_fields.append("commit")
-            if invalid_fields:
-                issues.append(
-                    {
-                        "level": "error",
-                        "code": "invalid_frontmatter_field",
-                        "detail": "値が空または形式不正: " + ", ".join(sorted(set(invalid_fields))),
-                    }
-                )
-
-    missing = [s for s in SECTIONS if s not in text]
-    for s in missing:
-        issues.append({"level": "error", "code": "missing_section", "detail": s})
-
-    if "あなた" in text:
-        issues.append(
-            {
-                "level": "error",
-                "code": "second_person",
-                "detail": "「あなた」は禁止。三人称『ユーザー』＋引用か伝聞で書く。",
-            }
-        )
-
-    body_chars = _prose_chars(text)
-    if body_chars < MIN_CHARS_SOFT:
-        issues.append(
-            {
-                "level": "warn",
-                "code": "too_short",
-                "detail": f"本文 {body_chars} 字（{MIN_CHARS_SOFT} 字未満）",
-            }
-        )
-    if body_chars > MAX_CHARS_SOFT:
-        issues.append(
-            {
-                "level": "warn",
-                "code": "too_long",
-                "detail": f"本文 {body_chars} 字（{MAX_CHARS_SOFT} 字超）",
-            }
-        )
+    body_chars, length_issues = _length_issues(text)
+    issues += length_issues
 
     repos = repos if repos is not None else discover_repos()
-    unresolved: List[str] = []
-    external: List[str] = []
-    for h in sorted(set(_commit_candidates(text))):
-        if _resolve_hash(h, repos) is not None:
-            continue
-        line = next((ln for ln in text.splitlines() if h in ln), "")
-        if EXTERNAL_CONTEXT.search(line):
-            external.append(h)
-        else:
-            unresolved.append(h)
-    for h in unresolved:
-        issues.append(
-            {
-                "level": "error",
-                "code": "unresolved_hash",
-                "detail": f"{h} はコミットとして書かれているが ~/Dev/git 配下のどのリポジトリにも存在しない。捏造の疑い。",
-            }
-        )
-    for h in external:
-        issues.append(
-            {
-                "level": "warn",
-                "code": "unverified_external_hash",
-                "detail": f"{h} は外部（upstream 等）のコミットなのでローカルでは検証できない。出典を明記しているか確認。",
-            }
-        )
+    issues += _hash_issues(text, repos)
 
     errors = [i for i in issues if i["level"] == "error"]
     return {

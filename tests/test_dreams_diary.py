@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -423,6 +424,17 @@ class IndexAndRegistrationTests(unittest.TestCase):
             self.assertIn("セッション 2", index)
             self.assertNotIn("メッセージ 999", index)
             self.assertNotIn("999", index)
+
+    def test_index_tool_refuses_root_home(self):
+        # cron worker で home が root に解決されたとき、別ディレクトリへ INDEX を書かない
+        import __init__ as plugin  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".hermes"
+            root.mkdir()
+            res = json.loads(plugin._index_handler({}, home=root))
+        self.assertFalse(res["ok"])
+        self.assertIn("プロファイル", res["error"])
 
     def test_register_exposes_four_tools(self):
         import __init__ as plugin  # noqa: PLC0415
