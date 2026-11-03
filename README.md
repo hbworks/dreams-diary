@@ -13,7 +13,7 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 | :--- | :--- |
 | `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file always holds the full text, even when the returned pack is capped by `max_chars`. |
 | `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). |
-| `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports char count, and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
+| `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports the prose char count (frontmatter and headings excluded; warns under 800 / over 3000), and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
 | `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
 
 ## Data layout — one diary per agent

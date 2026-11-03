@@ -36,7 +36,7 @@ USER_MSG_CHARS = 180
 MAX_USER_MSGS_PER_SESSION = 12
 INJECTED_PREFIXES = ("[IMPORTANT:", "[The user sent", "[System", "[SYSTEM")
 MAX_CHARS_SOFT = 3000
-MIN_CHARS_SOFT = 300
+MIN_CHARS_SOFT = 800
 
 
 # ---------------------------------------------------------------- profile paths
@@ -506,6 +506,22 @@ EXTERNAL_CONTEXT = re.compile(
 )
 
 
+def _prose_chars(text: str) -> int:
+    """本文だけの字数。frontmatter と見出し行を除き、空白も数えない。
+
+    ファイル全体を数えると frontmatter と6見出し（実測 140〜160 字）が下限を
+    肩代わりしてしまい、各節が要約1文の日記でも通ってしまう。
+    """
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                lines = lines[i + 1 :]
+                break
+    prose = "\n".join(l for l in lines if not l.lstrip().startswith("#"))
+    return len(re.sub(r"\s", "", prose))
+
+
 def _commit_candidates(text: str) -> List[str]:
     """コミットだと分かる文脈で書かれたハッシュだけを候補にする。
 
@@ -655,14 +671,22 @@ def validate_diary(
             }
         )
 
-    body_chars = len(re.sub(r"\s", "", text))
+    body_chars = _prose_chars(text)
     if body_chars < MIN_CHARS_SOFT:
         issues.append(
-            {"level": "warn", "code": "too_short", "detail": f"{body_chars} 字（{MIN_CHARS_SOFT} 字未満）"}
+            {
+                "level": "warn",
+                "code": "too_short",
+                "detail": f"本文 {body_chars} 字（{MIN_CHARS_SOFT} 字未満）",
+            }
         )
     if body_chars > MAX_CHARS_SOFT:
         issues.append(
-            {"level": "warn", "code": "too_long", "detail": f"{body_chars} 字（{MAX_CHARS_SOFT} 字超）"}
+            {
+                "level": "warn",
+                "code": "too_long",
+                "detail": f"本文 {body_chars} 字（{MAX_CHARS_SOFT} 字超）",
+            }
         )
 
     repos = repos if repos is not None else discover_repos()

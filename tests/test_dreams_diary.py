@@ -302,6 +302,26 @@ class ValidateTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("second_person", res["errors"])
 
+    def test_short_prose_warns_even_when_file_is_long(self):
+        # frontmatter＋見出し（実測 140〜160 字）を字数に含めると、要約1文の日記が通ってしまう
+        self._write(self._good_body())
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("too_short", [i["code"] for i in res["issues"]])
+        self.assertLess(res["chars"], core.MIN_CHARS_SOFT)
+
+    def test_prose_chars_exclude_frontmatter_and_headings(self):
+        long = "\n\n".join(f"{s}\n" + "あ" * 150 for s in core.SECTIONS)
+        body = (
+            f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
+            f"# {DAY}\n\n{long}\n"
+        )
+        self._write(body)
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertTrue(res["ok"], res)
+        self.assertNotIn("too_short", [i["code"] for i in res["issues"]])
+        self.assertEqual(res["chars"], 150 * len(core.SECTIONS))
+
     def test_hash_without_commit_context_is_ignored(self):
         # 文脈の無いバッククォート付き16進は、ホスト名やIDの可能性が高いので検査しない
         self._write(self._good_body() + "\nメモ `0c257b3`\n")
