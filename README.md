@@ -210,7 +210,9 @@ The cron `script` runs *before* the agent, so validation happens inside the same
 backstop, every material pack starts with `## 前回の日記の検証`: the most recent earlier diary is
 validated and a failure is printed with its codes and absolute path, which the cron prompt tells
 the agent to fix before writing today's entry. `cli.py audit [--days N]` does the same across the
-last N diaries for manual or pipeline use and exits non-zero when any fails.
+last N diaries for manual or pipeline use and exits non-zero when any fails. The audit result also
+carries `warn_counts` and `error_counts` (issue counts by code and level), so a warning that keeps
+appearing can be told apart from new ones in a single command instead of reading every diary.
 
 ### Index after the write
 

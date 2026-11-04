@@ -237,6 +237,23 @@ class MaterialTests(unittest.TestCase):
         self.assertEqual(res["checked"], 2)
         self.assertEqual(res["failed"], ["2026-10-05.md"])
 
+    def test_audit_counts_warns_and_errors_by_code(self):
+        # warn が常に出る状態で「新規か履歴か」を1コマンドで切り分けられるよう、
+        # audit は level ごとのコード別件数を持つ。ok の有無だけでは見えない。
+        dreams = self.home / "dreams"
+        dreams.mkdir(parents=True, exist_ok=True)
+        (dreams / "2026-10-04.md").write_text(
+            "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+            "commit: none\n---\n\n# 2026-10-04\n\n"
+            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + "\n",
+            encoding="utf-8",
+        )
+        (dreams / "2026-10-05.md").write_text("---\ndate: 2026-10-05\n---\n本文だけ。\n", encoding="utf-8")
+        res = core.audit_diaries(home=self.home, days=5, repos=[self.repo])
+        self.assertEqual(res["warn_counts"], {"time_absent": 1, "too_short": 2})
+        self.assertEqual(res["error_counts"], {"missing_frontmatter_field": 1, "missing_section": 6})
+
     def test_audit_orders_variants_by_numeric_suffix(self):
         dreams = self.home / "dreams"
         dreams.mkdir(parents=True, exist_ok=True)

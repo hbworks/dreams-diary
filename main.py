@@ -1570,11 +1570,27 @@ def audit_diaries(
                 }
             )
     failed = [r["file"] for r in results if not r["ok"]]
+    # 同じ warn が常に出ると warn が死ぬ。「新規か履歴か」を1コマンドで切り分けられるよう
+    # level ごとのコード別件数を併せる。件数順ではなくコード名順（JSON の順序を安定させる）。
+    warn_counts = collections.Counter(
+        issue["code"]
+        for result in results
+        for issue in result["issues"]
+        if issue["level"] == "warn"
+    )
+    error_counts = collections.Counter(
+        issue["code"]
+        for result in results
+        for issue in result["issues"]
+        if issue["level"] == "error"
+    )
     return {
         "ok": not failed,
         "home": str(home),
         "checked": len(results),
         "failed": failed,
+        "warn_counts": dict(sorted(warn_counts.items())),
+        "error_counts": dict(sorted(error_counts.items())),
         "results": results,
     }
 
