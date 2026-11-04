@@ -155,8 +155,13 @@ because they never match the diary filename and would otherwise drop out of the 
 
 ### What the material contains
 
-The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## 会話` →
+The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## 会話` → `## 自分の発言（応答の本文・抜粋）` →
 `## 成功した操作` → `## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
+
+- **自分の発言（応答の本文・抜粋）** lists the day's assistant messages that have body text,
+  one line each as `- HH:MM 応答: excerpt`. Titles are not enough to know what was actually
+  returned, so the last response of each session keeps 600 characters and the earlier ones 140.
+  User utterances in `## 会話` carry `HH:MM` too, so "who said it" is readable without guessing.
 
 - **成功した操作** lists the day's `terminal` calls that returned `exit_code == 0` with no error,
   one line each as `- HH:MM terminal — command summary`, capped at 15 items with `（ほか N 件）`.
@@ -291,7 +296,13 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
   calling a real commit a fabrication) but never runs when `DREAMS_REPOS` pinned the set. If the
   retry still misses it, the error stands. Two limits remain: a repo nested *inside* another repo
   is not scanned separately (the walk stops at the outer `.git`), and `DREAMS_REPOS` disables the
-  retry so a pinned set stays exactly as given. This catches the most common LLM failure in
+  retry so a pinned set stays exactly as given.
+  **When the search space is empty** (no repo was found at all — a cron worker with a different
+  HOME, a machine without `~/Dev/git`), the code is `hash_unverifiable` (warn) instead: absence
+  of a search space cannot prove absence of a commit. Reporting it as an error would put a false
+  `前回の日記の検証: 未通過` into the next day's material, and the next writer would faithfully
+  copy it as its own mistake, moving the error from the validator into the diary's history.
+  This catches the most common LLM failure in
   this format: a hash whose
   date and time are right but whose digits were invented.
 - `unverified_external_hash` (warn) — an explicitly paired remote ref and hash (e.g.
@@ -354,10 +365,15 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。`--path FILE` で日記ファイルを
 直接指定できます（`-2` / `-3` の別名ファイルを検査するときに必要）。
 
-### 素材の内容と限界（v1.5）
+### 素材の内容と限界（v1.6）
 
-素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → 成功した操作 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
+素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → 自分の発言（応答の本文・抜粋） → 成功した操作 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
 前日の日記から読み戻すのは第5・6節だけで、600字まで。事実ではなく未検証の自己申告として置きます。
+
+`## 自分の発言` は、その日の assistant メッセージのうち本文を持つものを `- HH:MM 応答: 抜粋` で並べます。
+会話節は応答の件数しか持たないため、何を返したかはここにしかありません。セッションごとに最後の応答だけ
+600字、それ以前は140字まで残します（結論は最後に来るため）。`## 会話` のユーザー発言にも時刻を付けます。
+切り詰めが走ってもこの節は落としません（成功した操作と同じ扱い）。
 
 ツールの失敗は、既知の形（terminal の非0 `exit_code` / 空でない `error`、patch・write_file の
 `success:false` / `error`、read_file の `not_found:true`、その他の `error`）だけを拾い、1日15件まで。

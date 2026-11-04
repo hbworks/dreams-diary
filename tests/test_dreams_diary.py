@@ -183,6 +183,19 @@ class MaterialTests(unittest.TestCase):
         self.assertIn(self.sha, material)
         self.assertIn("テスト用の記憶", material)
 
+    def test_truncation_keeps_successful_operations_section(self):
+        successes = "## 成功した操作\n- 12:34 terminal — python3 scripts/check.py\n"
+        with (
+            patch.object(core, "_sessions_material", return_value="会話の行。\n" * 2000),
+            patch.object(core, "_successful_operations_material", return_value=successes),
+        ):
+            got = core.collect_material(DAY, home=self.home, max_chars=1000, repos=[self.repo])
+
+        self.assertTrue(got["truncated"])
+        material = got["material"]
+        self.assertIn("## 成功した操作", material)
+        self.assertIn("python3 scripts/check.py", material)
+
 
     def test_material_reports_previous_diary_ok(self):
         # post-run フックが無い代わりに、翌日の素材で前回分の検証結果を知らせる
@@ -474,8 +487,8 @@ class ValidateTests(unittest.TestCase):
     def test_quoted_frontmatter_commit_hash_is_verified(self):
         body = self._good_body().replace("commit: none", 'commit: "deadbeefcafebabe"')
         self._write(body)
-        res = core.validate_diary(DAY, home=self.home, repos=[])
-        self.assertFalse(res["ok"])
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
         self.assertIn("unresolved_hash", res["errors"])
 
     def test_frontmatter_commit_list_hashes_are_verified(self):
@@ -483,9 +496,22 @@ class ValidateTests(unittest.TestCase):
             "commit: none", "commit:\n  - deadbeefcafebabe"
         )
         self._write(body)
-        res = core.validate_diary(DAY, home=self.home, repos=[])
-        self.assertFalse(res["ok"])
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertFalse(res["ok"], res)
         self.assertIn("unresolved_hash", res["errors"])
+
+    def test_hash_with_no_searchable_repo_is_unverifiable_not_fabricated(self):
+        """repo が1つも見つからない環境で「捏造」と断定しない。
+
+        cron worker の HOME ずれなどで `discover_repos()` が空を返すと、この判定が
+        error になり、翌日の素材の `前回の日記の検証` に「未通過」として載る。次の
+        書き手はそれを自分の誤りとして書き写すので、誤りが日記の履歴に定着する。
+        """
+        self._write(self._good_body() + "\nコミット `0c257b3` を打った。\n")
+        res = core.validate_diary(DAY, home=self.home, repos=[])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("hash_unverifiable", [i["code"] for i in res["issues"]])
+        self.assertNotIn("unresolved_hash", res["errors"])
 
     def test_frontmatter_commit_list_accepts_a_local_hash(self):
         body = self._good_body().replace(
@@ -540,7 +566,7 @@ class ValidateTests(unittest.TestCase):
                     self._good_body()
                     + f"\nコミット `deadbeefcafebabe` を記録。参照先の説明: {marker}\n"
                 )
-                res = core.validate_diary(DAY, home=self.home, repos=[])
+                res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
                 self.assertFalse(res["ok"], res)
                 self.assertIn("unresolved_hash", res["errors"])
 

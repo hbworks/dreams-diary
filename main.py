@@ -45,6 +45,11 @@ SECTIONS = (
 DEFAULT_MAX_MATERIAL = 14000
 USER_MSG_CHARS = 180
 MAX_USER_MSGS_PER_SESSION = 12
+# 自分の発言（応答本文）。会話節は件数しか持たないので、何を返したかはここにしか無い。
+# 途中の応答は短く、セッション最後の応答だけ長めに残す（結論はそこに来る）。
+ASSIST_CLIP = 140
+ASSIST_FINAL_CLIP = 600
+MAX_ASSIST_ITEMS_PER_SESSION = 8
 INJECTED_PREFIXES = ("[IMPORTANT:", "[The user sent", "[System", "[SYSTEM")
 MAX_CHARS_SOFT = 3000
 MIN_CHARS_SOFT = 800
@@ -330,8 +335,9 @@ def _sessions_material(day: str, home: Path) -> str:
             msg = _clip(r["content"], USER_MSG_CHARS)
             # 注入文脈は本文からは除くが、行そのもののツール集計は落とさない
             if not msg.startswith(INJECTED_PREFIXES):
-                if not s["users"] or s["users"][-1] != msg:
-                    s["users"].append(msg)
+                if not s["users"] or s["users"][-1][1] != msg:
+                    when = datetime.datetime.fromtimestamp(r["timestamp"]).strftime("%H:%M")
+                    s["users"].append((when, msg))
         elif r["role"] == "assistant" and r["content"]:
             s["asst"] += 1
         if r["tool_name"]:
@@ -345,11 +351,63 @@ def _sessions_material(day: str, home: Path) -> str:
         if s["tools"]:
             tools = ", ".join(f"{k}×{v}" for k, v in s["tools"].most_common(6))
             out.append(f"使ったツール: {tools}\n")
-        for u in s["users"][:MAX_USER_MSGS_PER_SESSION]:
-            out.append(f"- 発言: {u}\n")
+        for when, u in s["users"][:MAX_USER_MSGS_PER_SESSION]:
+            out.append(f"- {when} 発言: {u}\n")
         if len(s["users"]) > MAX_USER_MSGS_PER_SESSION:
             out.append(f"- （ほか {len(s['users']) - MAX_USER_MSGS_PER_SESSION} 件の発言）\n")
     return "".join(out)
+
+
+def _own_statements_material(day: str, home: Path) -> str:
+    """その日のアシスタント自身の応答本文（抜粋）。
+
+    会話節は応答の件数しか持たないため、「何を返したか」はここにしか無い。
+    最後の応答だけ長めに残すのは、レビューや結論がそこに来るから。
+    """
+    db = state_db_path(home)
+    if not db.exists():
+        return "（state.db が見つからない）\n"
+    t0, t1 = _day_bounds(day)
+    rows = None
+    err: Optional[Exception] = None
+    con = None
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "select session_id, content, timestamp from messages "
+            "where timestamp >= ? and timestamp < ? and role = 'assistant' "
+            "and content is not null and length(trim(content)) > 0 "
+            "order by timestamp",
+            (t0, t1),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        err = exc
+        rows = None
+    finally:
+        if con is not None:
+            con.close()
+    if rows is None:
+        return f"（応答本文の取得に失敗: {err}）\n"
+    if not rows:
+        return "（この日の応答本文は無い）\n"
+
+    per: "collections.OrderedDict[str, List[sqlite3.Row]]" = collections.OrderedDict()
+    for row in rows:
+        per.setdefault(str(row["session_id"] or ""), []).append(row)
+
+    lines: List[str] = []
+    for items in per.values():
+        picked = items[-MAX_ASSIST_ITEMS_PER_SESSION:]
+        if len(picked) < len(items):
+            lines.append(f"- （冒頭 {len(items) - len(picked)} 回の応答は省略）")
+        for index, row in enumerate(picked):
+            limit = ASSIST_FINAL_CLIP if index == len(picked) - 1 else ASSIST_CLIP
+            when = datetime.datetime.fromtimestamp(row["timestamp"]).strftime("%H:%M")
+            lines.append(f"- {when} 応答: {_clip(row['content'], limit)}")
+    if not lines:
+        return "（この日の応答本文は無い）\n"
+    return "\n".join(lines) + "\n"
 
 
 def _memory_material(day: str, home: Path) -> str:
@@ -854,6 +912,7 @@ def collect_material(
     )
     self_report = _self_report_material(day, home)
     conversation = _sessions_material(day, home)
+    own = _own_statements_material(day, home)
     successes = _successful_operations_material(day, home)
     failures = _failures_material(day, home)
     edited = _edited_files(day, home)
@@ -861,6 +920,7 @@ def collect_material(
     memory = _memory_material(day, home)
     self_head = "## 前日の自己申告（未検証）\n"
     conv_head = "## 会話\n"
+    own_head = "\n## 自分の発言（応答の本文・抜粋）\n"
     fail_head = "\n## ツールの失敗（原因は未確認）\n"
     commit_head = "\n## コミット\n"
     mem_head = "\n## この日 memory に追加された項目\n"
@@ -870,6 +930,8 @@ def collect_material(
         + self_report
         + conv_head
         + conversation
+        + own_head
+        + own
         + successes
         + fail_head
         + failures
@@ -931,6 +993,9 @@ def collect_material(
             len(header)
             + len(self_head)
             + len(conv_head)
+            + len(own_head)
+            + len(own)
+            + len(successes)
             + len(fail_head)
             + len(commit_head)
             + len(mem_head)
@@ -959,6 +1024,9 @@ def collect_material(
                 + _fit(self_report, self_budget, "\n（前日の自己申告は上限で切り詰めた）\n")
                 + conv_head
                 + _fit(conversation, conv_budget, "\n（会話は上限で切り詰めた）\n")
+                + own_head
+                + own
+                + successes
                 + fail_head
                 + _fit(failures, fail_budget, "\n（ツールの失敗は上限で切り詰めた）\n")
                 + commit_head
@@ -1384,19 +1452,36 @@ def _hash_issues(
             continue
         (external if all(references[h]) else unresolved).append(h)
 
+    search_space = list(repos)
     if unresolved and deep_scan is not None:
-        extra = [path for path in deep_scan() if path not in repos]
+        extra = [path for path in deep_scan() if path not in search_space]
         if extra:
-            unresolved = [h for h in unresolved if _resolve_hash(h, extra) is None]
+            search_space.extend(extra)
+            unresolved = [h for h in unresolved if _resolve_hash(h, search_space) is None]
 
-    issues = [
-        _issue(
-            "error",
-            "unresolved_hash",
-            f"{h} はコミットとして書かれているが ~/Dev/git 配下のどのリポジトリにも存在しない。捏造の疑い。",
-        )
-        for h in unresolved
-    ]
+    if unresolved and not search_space:
+        # 探索範囲が空なら「存在しない」は言えない。repo が見つからない環境
+        # （cron worker の HOME ずれ等）で捏造と断定すると、その誤りが翌日の素材に
+        # 「前回の検証: 未通過」として載り、次の書き手が自分の誤りとして書き写す。
+        # 捏造の断定は、実際に探した空間があるときだけ行う。
+        issues = [
+            _issue(
+                "warn",
+                "hash_unverifiable",
+                f"{h} はコミットとして書かれているが、探索できたリポジトリが1つも無いため"
+                "実在を確認できなかった。捏造とは断定しない。",
+            )
+            for h in unresolved
+        ]
+    else:
+        issues = [
+            _issue(
+                "error",
+                "unresolved_hash",
+                f"{h} はコミットとして書かれているが ~/Dev/git 配下のどのリポジトリにも存在しない。捏造の疑い。",
+            )
+            for h in unresolved
+        ]
     issues.extend(
         _issue(
             "warn",
