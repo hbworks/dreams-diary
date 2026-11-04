@@ -200,6 +200,9 @@ def _sync(args: _Args) -> int:
 
 
 def main(argv: List[str]) -> int:
+    if any(arg in ("--help", "-h") for arg in argv):
+        print(__doc__.strip())
+        return 0
     try:
         args = _parse(argv)
     except ValueError as exc:

@@ -214,6 +214,17 @@ class SetupCliTests(unittest.TestCase):
 
 
 class SetupCliIntegrationTests(unittest.TestCase):
+    def test_cli_help_flags_print_module_usage_and_succeed(self):
+        for flag in ("--help", "-h"):
+            with self.subTest(flag=flag):
+                out = io.StringIO()
+                err = io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = cli_mod.main([flag])
+                self.assertEqual(code, 0)
+                self.assertEqual(out.getvalue().strip(), cli_mod.__doc__.strip())
+                self.assertEqual(err.getvalue(), "")
+
     def test_cli_install_requires_profile(self):
         err = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(err):
