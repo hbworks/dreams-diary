@@ -68,6 +68,16 @@ class RenderTests(unittest.TestCase):
         self.assertIn("HH:MM", text)
         self.assertIn("セッション", text)
 
+    def test_prompt_names_the_success_section(self):
+        """素材に `## 成功した操作` があることを書き手へ伝える（terminal の仕事の受け皿）。"""
+        self.assertIn("成功した操作", core.render_cron_prompt())
+
+    def test_prompt_scopes_the_commit_section_to_patch_and_write_file(self):
+        """コミット節の範囲を patch / write_file と明示し、terminal 編集を数えないと書く。"""
+        text = core.render_cron_prompt()
+        self.assertIn("patch / write_file", text)
+        self.assertIn("terminal 経由の編集", text)
+
     def test_missing_token_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "prompt.md"

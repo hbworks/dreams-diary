@@ -22,7 +22,7 @@ import shutil
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from .scripts.dreams_diary_paths import hermes_root as _hermes_root
@@ -382,7 +382,8 @@ def _memory_material(day: str, home: Path) -> str:
     return "\n".join(f"- [{c}] {_clip(t, 160)}" for c, t in rows) + "\n"
 
 
-REPO_SCAN_MAX_DEPTH = 3
+REPO_SCAN_MAX_DEPTH = 5
+REPO_SCAN_DEEP_DEPTH = 8
 REPO_SCAN_SKIP = {"node_modules", "venv", "__pycache__", "site-packages", "build", "dist"}
 
 
@@ -390,8 +391,10 @@ def discover_repos(base: Optional[str] = None, max_depth: Optional[int] = None) 
     """ハッシュ検証に使うリポジトリ一覧。環境変数 DREAMS_REPOS で上書き可。
 
     1階層だけを見ると `~/Dev/git/<group>/<repo>` のような入れ子のリポジトリが
-    「存在しない」ことになり、実在するコミットを捏造と誤判定する。深さ3まで辿る
-    （DREAMS_REPO_DEPTH で変更可）。
+    「存在しない」ことになり、実在するコミットを捏造と誤判定する。深さ5まで辿る
+    （DREAMS_REPO_DEPTH で変更可）。深さ5は実測で ~/Dev/git の全ディレクトリを歩いても
+    1ms 未満で、コストはディレクトリ数に比例するだけ。境界より深い場所は
+    `_hash_issues` の深追い再探索（REPO_SCAN_DEEP_DEPTH）が拾う。
     """
     env = os.environ.get("DREAMS_REPOS", "").strip()
     if env:
@@ -754,15 +757,22 @@ def _commits_material(
 
     out: List[str] = []
     if edited is not None and not edited:
-        out.append("（自分が編集したファイルはない）")
+        out.append(
+            "（patch / write_file で編集したファイルはない。"
+            "terminal 経由の編集はここに数えないため、下の「ほかのコミット」に回る）"
+        )
     elif not blocks:
         out.append(
-            "（この日のコミットは無い）" if edited is None else "（自分が編集したファイルと重なるコミットは無い）"
+            "（この日のコミットは無い）"
+            if edited is None
+            else "（patch / write_file で編集したファイルと重なるコミットは無い）"
         )
     out.extend(blocks)
     if edited is None:
         out.append("（編集を特定できないため全リポジトリ）")
-    out.append(f"ほかのコミット: {others} 件（自分が編集したファイルと重ならない）")
+    out.append(
+        f"ほかのコミット: {others} 件（patch / write_file で編集したファイルと重ならない）"
+    )
     return "\n".join(out) + "\n"
 
 
@@ -1286,11 +1296,30 @@ def _frontmatter_issues(text: str, target: Path) -> List[Dict[str, str]]:
     return issues
 
 
+QUOTED_SPAN = re.compile(r"「[^」]*」|『[^』]*』|“[^”]*”|\"[^\"]*\"")
+
+
+def _outside_quotes(text: str) -> str:
+    """閉じた引用符の中を取り除いた本文。閉じていない引用は残す（検査を抜けさせない）。"""
+    return QUOTED_SPAN.sub("", text)
+
+
 def _section_issues(text: str) -> List[Dict[str, str]]:
-    """6節の欠落と二人称の混入。"""
+    """6節の欠落と二人称の混入。
+
+    「あなた」の検査は引用符の外側だけを見る。README が「引用か伝聞で書く」と案内して
+    いるのに、引用したユーザー発言の中の「あなた」で error になると、正しい書き方が
+    落ちる。閉じていない引用は除去しないので、逃げ道にはならない。
+    """
     issues = [_issue("error", "missing_section", section) for section in SECTIONS if section not in text]
-    if "あなた" in text:
-        issues.append(_issue("error", "second_person", "「あなた」は禁止。三人称『ユーザー』＋引用か伝聞で書く。"))
+    if "あなた" in _outside_quotes(text):
+        issues.append(
+            _issue(
+                "error",
+                "second_person",
+                "「あなた」は禁止。三人称『ユーザー』＋引用か伝聞で書く（引用符の中は対象外）。",
+            )
+        )
     return issues
 
 
@@ -1335,8 +1364,16 @@ def _time_issues(text: str) -> List[Dict[str, str]]:
     ]
 
 
-def _hash_issues(text: str, repos: List[Path]) -> List[Dict[str, str]]:
-    """コミット文脈のハッシュがローカルに実在するか。外部ハッシュは warn に留める。"""
+def _hash_issues(
+    text: str, repos: List[Path], deep_scan: Optional[Callable[[], List[Path]]] = None
+) -> List[Dict[str, str]]:
+    """コミット文脈のハッシュがローカルに実在するか。外部ハッシュは warn に留める。
+
+    ``deep_scan`` は既定の探索で見つからなかったときに一度だけ呼ぶ再探索。探索は
+    常に打ち切り条件（深さ・DREAMS_REPOS）を持つため、境界の外にあるリポジトリを
+    「捏造」と断定しないよう、判定の前により深く探し直す。見つからなければ従来どおり
+    error。再探索は未解決が出た日だけなので、通常の日はコストが増えない。
+    """
     unresolved: List[str] = []
     external: List[str] = []
     references: Dict[str, List[bool]] = collections.defaultdict(list)
@@ -1346,6 +1383,11 @@ def _hash_issues(text: str, repos: List[Path]) -> List[Dict[str, str]]:
         if _resolve_hash(h, repos) is not None:
             continue
         (external if all(references[h]) else unresolved).append(h)
+
+    if unresolved and deep_scan is not None:
+        extra = [path for path in deep_scan() if path not in repos]
+        if extra:
+            unresolved = [h for h in unresolved if _resolve_hash(h, extra) is None]
 
     issues = [
         _issue(
@@ -1387,8 +1429,17 @@ def validate_diary(
 
     issues += _time_issues(text)
 
-    repos = repos if repos is not None else discover_repos()
-    issues += _hash_issues(text, repos)
+    auto_discovery = repos is None
+    if auto_discovery:
+        repos = discover_repos()
+    # 既定探索の打ち切り境界より外にあるリポジトリを捏造扱いしないための再探索。
+    # 呼び出し側が repos を明示したとき（テスト・DREAMS_REPOS）は勝手に広げない。
+    # 深さだけを絞る DREAMS_REPO_DEPTH は速度のための調整なので、捏造という強い断定の
+    # 前では深さ REPO_SCAN_DEEP_DEPTH で探し直す（未解決が出た日だけの追加コスト）。
+    deep_scan = (
+        (lambda: discover_repos(max_depth=REPO_SCAN_DEEP_DEPTH)) if auto_discovery else None
+    )
+    issues += _hash_issues(text, repos, deep_scan)
 
     # 値そのものは出さない。自動マスクもしない（本文を機械が書き換えない原則）。
     issues += _secret_issues(text)

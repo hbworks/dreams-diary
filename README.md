@@ -156,7 +156,12 @@ because they never match the diary filename and would otherwise drop out of the 
 ### What the material contains
 
 The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## 会話` →
-`## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
+`## 成功した操作` → `## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
+
+- **成功した操作** lists the day's `terminal` calls that returned `exit_code == 0` with no error,
+  one line each as `- HH:MM terminal — command summary`, capped at 15 items with `（ほか N 件）`.
+  It exists because the commit section cannot see terminal edits: this is the only place a day
+  spent in `sed` / `git mv` / heredocs shows up as work. A day with no such calls omits the section.
 
 - **前日の自己申告（未検証）** reads back only sections 5 (借りているもの) and 6 (明日の自分へ)
   of the most recent earlier diary, capped at 600 characters, labelled with its filename and date
@@ -172,12 +177,15 @@ The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検
 - **コミット** only shows commits whose changed files overlap files this profile successfully
   `patch`ed or `write_file`d that day. Reads (`read_file`, `search_files`) and failed edits do not
   count. Matching is absolute-path based after `Path.resolve()`. The section ends with
-  `ほかのコミット: N 件（自分が編集したファイルと重ならない）`, capped at 20 commits per repo with
-  `（ほか N 件）`. Zero edits prints `（自分が編集したファイルはない）`; a DB without the tool-call
-  columns falls back to every repo plus `（編集を特定できないため全リポジトリ）`. Known limits:
-  edits made through `terminal` (`sed`, heredocs, `git mv`) are invisible, a file touched by two
-  profiles the same day appears as "mine" in both packs, and a commit made on a later day never
-  appears in the edit day's pack. **A missing commit is not a missing day's work.**
+  `ほかのコミット: N 件（patch / write_file で編集したファイルと重ならない）`, capped at 20 commits
+  per repo with `（ほか N 件）`. Zero edits prints
+  `（patch / write_file で編集したファイルはない…）` — the scope is named in the line itself, because
+  a terminal-only day is not a day without edits. A DB without the tool-call columns falls back to
+  every repo plus `（編集を特定できないため全リポジトリ）`. Known limits:
+  edits made through `terminal` (`sed`, heredocs, `git mv`) are invisible here — they appear in
+  `## 成功した操作` instead — a file touched by two profiles the same day appears as "mine" in both
+  packs, and a commit made on a later day never appears in the edit day's pack.
+  **A missing commit is not a missing day's work.**
   The validator still resolves hashes against every repo; only the material is scoped.
 
 ### Secret masking
@@ -259,8 +267,11 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
 - `invalid_frontmatter_date` / `frontmatter_date_mismatch` (error) — `date` must be a real `YYYY-MM-DD` date matching the diary filename.
 - `invalid_frontmatter_field` (error) — `author` must be non-empty, `sessions` and `messages` must be non-negative integers, and `commit` must be a non-empty scalar or list. Hash-shaped tokens in quoted, comma-separated, or block-list commit values are verified too.
 - `missing_section` (error) — one of the six headings is absent.
-- `second_person` (error) — `あなた` appears. Refer to the human as `ユーザー`, quote or report
-  what they said (`「〜と言っていた」`), never assert their inner state.
+- `second_person` (error) — `あなた` appears outside a closed quotation. Refer to the human as
+  `ユーザー`, quote or report what they said (`「〜と言っていた」`), never assert their inner state.
+  Spans inside `「…」`, `『…』`, `“…”` and `"…"` are not flagged, because quoting the user's own
+  words is the recommended form; an unclosed quote is *not* stripped, so it cannot be used to hide
+  the word.
 - `too_short` / `too_long` (warn) — under 800 or over 3000 prose characters (frontmatter and
   headings excluded; measured by `_prose_chars` in `main.py`).
 - `possible_secret` (warn) — the diary's full text contains a known secret shape (the same
@@ -271,9 +282,16 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
   diary that keeps the count and drops the times cannot be traced to a specific piece of work.
   Both `HH:MM` and the full-width `HH：MM` count. `ok` is unchanged.
 - `unresolved_hash` (error) — a hash written in commit context does not exist in any repo
-  under `~/Dev/git`. The scan is recursive (depth 3), so nested layouts such as
+  under `~/Dev/git`. The scan is recursive (depth 5), so nested layouts such as
   `~/Dev/git/<group>/<repo>/.git` are included; `DREAMS_REPOS` (colon-separated) pins the set
-  explicitly when a repo lives outside that tree. This catches the most common LLM failure in
+  explicitly when a repo lives outside that tree. Before declaring a hash fabricated, an
+  unresolved hash triggers one deeper retry (depth 8, `REPO_SCAN_DEEP_DEPTH`): the scan is
+  always bounded, so a repo past the boundary must not be reported as a fake commit. The retry
+  deliberately ignores `DREAMS_REPO_DEPTH` (accuracy outranks scan speed when the alternative is
+  calling a real commit a fabrication) but never runs when `DREAMS_REPOS` pinned the set. If the
+  retry still misses it, the error stands. Two limits remain: a repo nested *inside* another repo
+  is not scanned separately (the walk stops at the outer `.git`), and `DREAMS_REPOS` disables the
+  retry so a pinned set stays exactly as given. This catches the most common LLM failure in
   this format: a hash whose
   date and time are right but whose digits were invented.
 - `unverified_external_hash` (warn) — an explicitly paired remote ref and hash (e.g.
@@ -338,18 +356,26 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 
 ### 素材の内容と限界（v1.5）
 
-素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
+素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → 成功した操作 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
 前日の日記から読み戻すのは第5・6節だけで、600字まで。事実ではなく未検証の自己申告として置きます。
 
 ツールの失敗は、既知の形（terminal の非0 `exit_code` / 空でない `error`、patch・write_file の
 `success:false` / `error`、read_file の `not_found:true`、その他の `error`）だけを拾い、1日15件まで。
 失敗は間違いの証明ではないので、原因は素材から読める範囲でだけ書きます。
 
+`## 成功した操作` は、その日の `terminal` 呼び出しのうち `exit_code == 0` かつ error が無いものを
+`- HH:MM terminal — コマンド要約` で並べます（1日15件まで、残りは `（ほか N 件）`）。
+コミット節が terminal 経由の編集を見ないので、`sed`・`git mv`・ヒアドキュメントで進めた日はここが
+唯一の作業の記録になります。該当が無い日はこの節自体を出しません。
+
 `## コミット` は、その日に自分が `patch` / `write_file` で成功裏に触れたファイルと重なるコミットだけ。
 読み取りと失敗した編集は数えません。20コミット/リポジトリで打ち切り、残りは
-`ほかのコミット: N 件` に回します。`state.db` が無い、または tool 呼び出しの列が無い DB では
-全リポジトリを出して注記します。**terminal 経由の編集・同日に別プロファイルが触ったファイル・
-編集日とコミット日がずれたコミットは見えません。コミットが無い＝仕事が無い、ではありません。**
+`ほかのコミット: N 件（patch / write_file で編集したファイルと重ならない）` に回します。
+編集が0件の日は `（patch / write_file で編集したファイルはない…）` と書き、範囲をその行自体で明示します
+（terminal だけで進めた日を「編集なし」と誤読させないため）。`state.db` が無い、または tool 呼び出しの
+列が無い DB では全リポジトリを出して注記します。**terminal 経由の編集・同日に別プロファイルが触った
+ファイル・編集日とコミット日がずれたコミットはここには出ません。コミットが無い＝仕事が無い、ではありません。**
+terminal 経由の編集は `## 成功した操作` と会話から書きます。
 validator のハッシュ実在確認は従来どおり全リポジトリを探します（絞るのは素材だけ）。
 
 素材は保存・返却の前に既知形式の秘密情報を `[REDACTED:種別]` に置換し、ヘッダに `マスク: N 件` を出します。
@@ -376,6 +402,10 @@ Hermes Desktop の `active-profile.json` → `HERMES_PROFILE` → 最後に `sta
 ケースを検出します。
 
 検査でいちばん効くのは **コミットハッシュの実在確認**。日付と時刻は正しいのに桁だけ
-作られたハッシュが混入する事故が実際に起きたため、`~/Dev/git` 配下の全リポジトリを横断して
-`git cat-file -e` で確かめる。ホスト名・cron のジョブID・run ID など「16進に見えるが
+作られたハッシュが混入する事故が実際に起きたため、`~/Dev/git` 配下の全リポジトリを深さ5まで
+横断して `git cat-file -e` で確かめる。未解決のハッシュがあれば、捏造と断定する前に深さ8で
+もう一度だけ探し直す（探索は必ず打ち切り条件を持つので、境界の外のリポジトリを偽物と呼ばない）。
+二人称の検査は閉じた引用符（`「…」`・`『…』`・`“…”`・`"…"`）の外側だけを見る。ユーザーの発言を
+引用するのは推奨される書き方なので、引用の中の「あなた」では落とさない。閉じていない引用は
+除去しないため、検査の逃げ道にはならない。ホスト名・cron のジョブID・run ID など「16進に見えるが
 コミットではない」文字列は、文脈で判定して除外する。

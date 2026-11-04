@@ -422,6 +422,23 @@ class ValidateTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("second_person", res["errors"])
 
+    def test_quoted_utterance_may_contain_second_person(self):
+        # README は「引用してよい」と案内している。引用符の中の「あなた」は話者の言葉であって
+        # エージェントが二人称で呼んでいるわけではないため、error にしない。
+        self._write(
+            self._good_body().replace(
+                "本文。", "ユーザーは「あなたは直して」と言っていた。\"あなたの番です\" とも。"
+            )
+        )
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertNotIn("second_person", res["errors"])
+
+    def test_unclosed_quote_does_not_hide_second_person(self):
+        # 閉じていない引用を除去すると検査を抜けられる。閉じた引用だけを対象にする。
+        self._write(self._good_body().replace("本文。", "ユーザーは「あなたは直して と言っていた。"))
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertIn("second_person", res["errors"])
+
     def test_short_prose_warns_even_when_file_is_long(self):
         # frontmatter＋見出し（実測 140〜160 字）を字数に含めると、要約1文の日記が通ってしまう
         self._write(self._good_body())
@@ -555,6 +572,86 @@ class ValidateTests(unittest.TestCase):
 
 
 class RepoDiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def _repo_at_depth(root: Path, depth: int) -> tuple[Path, str]:
+        repo = root.joinpath(*[f"lvl{i}" for i in range(1, depth + 1)])
+        repo.mkdir(parents=True)
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+        (repo / "a.txt").write_text("x")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "test commit"], cwd=repo, check=True, env=env)
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return repo, sha
+
+    def _diary_with_hash(self, root: Path, sha: str) -> tuple[Path, Path]:
+        home = make_profile(root)
+        diary = home / "dreams" / f"{DAY}.md"
+        diary.parent.mkdir(parents=True, exist_ok=True)
+        diary.write_text(
+            f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+            f"commit: {sha}\n---\n\n# {DAY}\n\n"
+            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + "\n",
+            encoding="utf-8",
+        )
+        return home, diary
+
+    def test_depth_five_repo_is_discovered_by_default(self):
+        # ~/Dev/git/<org>/<team>/<area>/<repo> まで既定の探索で届くこと
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, _ = self._repo_at_depth(root, 5)
+            self.assertIn(repo, core.discover_repos(base=str(root)))
+
+    def test_hash_beyond_the_scan_depth_is_not_called_fabricated(self):
+        # 既定深度を超える場所のリポジトリでも、深追いの再探索で実在を確認できれば error にしない
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, sha = self._repo_at_depth(root, core.REPO_SCAN_MAX_DEPTH + 1)
+            self.assertNotIn(repo, core.discover_repos(base=str(root)))
+            home, diary = self._diary_with_hash(root, sha)
+            real = core.discover_repos
+            with patch.object(
+                core,
+                "discover_repos",
+                side_effect=lambda base=None, max_depth=None: real(
+                    base=str(root), max_depth=max_depth
+                ),
+            ):
+                res = core.validate_diary(path=str(diary), home=home)
+            self.assertNotIn("unresolved_hash", res["errors"], res)
+            self.assertTrue(res["ok"], res)
+
+    def test_missing_hash_still_errors_after_the_deep_scan(self):
+        # 深追いしても見つからないハッシュは従来どおり error（検査を弱めない）
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_at_depth(root, 2)
+            home, diary = self._diary_with_hash(root, "deadbeef1")
+            real = core.discover_repos
+            with patch.object(
+                core,
+                "discover_repos",
+                side_effect=lambda base=None, max_depth=None: real(
+                    base=str(root), max_depth=max_depth
+                ),
+            ):
+                res = core.validate_diary(path=str(diary), home=home)
+            self.assertIn("unresolved_hash", res["errors"], res)
+
     def test_nested_repos_are_discovered(self):
         # ~/Dev/git/<group>/<repo> のような入れ子も見つける（1階層だけだと捏造扱いになる）
         with tempfile.TemporaryDirectory() as tmp:

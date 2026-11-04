@@ -85,6 +85,15 @@ class TestMaterialVisibility(unittest.TestCase):
         self.assertIn("## 成功した操作", material)
         self.assertIn("echo test > file.txt", material)
 
+    def test_terminal_only_edits_are_not_claimed_as_no_edits(self):
+        """terminal 経由の編集しかない日は「編集なし」と断定せず、範囲を明示する。"""
+        from main import collect_material
+
+        material = collect_material(day="2023-01-01", home=self.home)["material"]
+        commits = material.split("## コミット\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("patch / write_file", commits)
+        self.assertNotIn("（自分が編集したファイルはない）", commits)
+
     def test_terminal_without_zero_exit_code_is_not_reported_as_success(self):
         timestamp = datetime.datetime.strptime(
             "2023-01-01 09:05", "%Y-%m-%d %H:%M"

@@ -402,7 +402,8 @@ class CommitScopeTests(unittest.TestCase):
         home = make_profile(self.root, rows)
         material = core.collect_material(DAY, home=home, repos=[self.repo])["material"]
         commits = _section(material, "## コミット")
-        self.assertIn("（自分が編集したファイルはない）", commits)
+        self.assertIn("（patch / write_file で編集したファイルはない", commits)
+        self.assertNotIn("（自分が編集したファイルはない）", commits)
         self.assertNotIn(self.mine, commits)
         self.assertNotIn(self.other, commits)
         self.assertIn("ほかのコミット: 2 件", material)
