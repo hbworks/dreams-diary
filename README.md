@@ -26,7 +26,8 @@ Every profile gets its own directory and its own data. Nothing is shared.
 ├── INDEX.md               generated index (last-paragraph excerpt)
 ├── persona.md             optional: this agent's voice instructions
 ├── user.md                optional: who the writer is writing about
-│                          `---\nname: まゆ\n---` — used as the form of address
+│                          `---\nname: まゆ\n---` — explicit override for the form of address
+│                          (otherwise the name in memories/USER.md or memory.db is used)
 └── _material/YYYY-MM-DD.md  raw material used for that day
 ```
 
@@ -161,7 +162,8 @@ The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検
 `## 成功した操作` → `## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
 
 - **この人のこと（直近14日の機械抽出）** is material for writing *who the user is*, not a verdict.
-  It carries the configured name (`dreams/user.md`), the `user` / `preference` memory rows added in
+  It carries the resolved form of address (`dreams/user.md`, else `memories/USER.md` /
+  `MEMORY.md`, else `memory.db`), the `user` / `preference` memory rows added in
   the last 14 days (10 max, 120 chars each), and the words that recurred on 3+ days — katakana words
   and kanji compounds only, ranked by the number of days, `- 「語」N日`. Mechanism-cut 2–4 character
   n-grams were rejected: they produce `me`, `ージ`, `認し` fragments that say nothing about a person.
@@ -284,8 +286,12 @@ carries the same description into the prompt:
 Legacy six-section diaries stay valid: the validator no longer requires headings, and the index and
 the next day's material read the **last paragraph**, which for a legacy diary is `## 明日の自分へ`.
 
-The name comes from `dreams/user.md` (`name:` in the frontmatter); without it the writer says
-「ユーザー」. The name is never guessed from the material or memory. `あなた` is still an error.
+The form of address is resolved in this order: `dreams/user.md` (`name:`) → `memories/USER.md` →
+`memories/MEMORY.md` → `memory.db` (`user` / `preference` rows). Only an explicit statement counts
+(`ユーザーの名前は「まゆ」`, `name: まゆ`, `the user's name is …`); a plain fact like "User prefers
+short answers" is not a name, and an agent handle (`@coding`) or a placeholder (`ユーザー`) is
+rejected. With nothing recorded the writer says 「ユーザー」. Names are never inferred from the
+material or from conversation.
 
 ## Validator rules
 
@@ -392,7 +398,8 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 前日の日記から読み戻すのは**最終段落**（散文なら申し送り、旧6節なら「明日の自分へ」の中身）だけで、
 600字まで。事実ではなく未検証の自己申告として置きます。
 
-`## この人のこと` は、呼び名（`dreams/user.md` の `name:`）、直近14日の memory のうち
+`## この人のこと` は、呼び名（`dreams/user.md` の `name:` → `memories/USER.md` →
+`memories/MEMORY.md` → `memory.db` の順に、明示された記述だけを採る）、直近14日の memory のうち
 `user` / `preference` の項目（10件まで、各120字）、3日以上に出た語（カタカナ語と漢語だけ、
 出現日数の順、`- 「語」N日`）を並べます。機械抽出であって人物像の断定ではありません。
 2〜4文字の機械的な n-gram は「me」「ージ」「認し」のような断片になるため採りません。

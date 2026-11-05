@@ -66,6 +66,22 @@ PERSON_PHRASE_PATTERNS = (
     re.compile(r"[一-龠]{2,4}"),
 )
 
+# 呼び名は「明示された言い方」だけを採る。会話や文脈から人名らしきものを拾うと、
+# リポジトリ名・モデル名・エージェント名を呼び名にしてしまう。
+USER_NAME_PATTERNS = (
+    re.compile(
+        r"(?:ユーザー|利用者|相手)(?:の)?(?:名前|呼び名|呼び方|ネーム)\s*(?:は|:|：|を)\s*"
+        r"[「『\"'“]?([^」』\"'“”\n。、,]{1,20})"
+    ),
+    re.compile(r"^(?:name|呼び名|呼び方)\s*[:：]\s*[「『\"'“]?([^\n]{1,20})", re.M | re.I),
+    re.compile(r"(?:the )?user'?s name is\s*[「『\"'“]?([^\n。,.、]{1,20})", re.I),
+    re.compile(
+        r"(?:call|refer to) (?:the )?user (?:as|by)\s*"
+        r"[「『\"'“]?([A-Za-z0-9_\-ぁ-んァ-ヶ一-龠ー]{1,20})",
+        re.I,
+    ),
+)
+
 DEFAULT_MAX_MATERIAL = 14000
 USER_MSG_CHARS = 180
 MAX_USER_MSGS_PER_SESSION = 12
@@ -464,18 +480,93 @@ def _memory_material(day: str, home: Path) -> str:
     return "\n".join(f"- [{c}] {_clip(t, 160)}" for c, t in rows) + "\n"
 
 
-def _user_name(home: Path) -> str:
-    """呼び名は `dreams/user.md` に書かれた名前だけを使う。
-
-    素材・記憶・会話から名前を推測すると、別人の名前や古い呼び方が本文へ入る。
-    ファイルが無い日は空を返し、書き手は「ユーザー」と書く。
-    """
-    path = home / "dreams" / "user.md"
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+def _clean_name(raw: str) -> str:
+    """抽出した文字列を呼び名として使える形に整える。使えなければ空を返す。"""
+    name = raw.strip().strip("「」『』\"'“”’").strip()
+    name = re.sub(r"[。、,.!?！？:：;；]+$", "", name).strip()
+    if name.endswith("さん") and len(name) > 2:
+        name = name[:-2]
+    if not name or len(name) > 20 or "§" in name or "\n" in name:
         return ""
-    return _unquote_scalar(_frontmatter_fields(text).get("name", "")).strip()
+    if name.startswith("@"):
+        return ""  # エージェントのハンドル（@coding 等）は呼び名ではない
+    if name.lower() in {"user", "the user", "unknown", "null", "none", "me", "you"}:
+        return ""
+    if name in {"ユーザー", "利用者", "相手", "あなた", "なし", "未設定", "不明", "非公開"}:
+        return ""
+    return name
+
+
+def _name_from_text(text: str) -> str:
+    """「ユーザーの名前は…」と明示されている行だけから呼び名を取る。
+
+    文脈から人名らしきものを拾うと、リポジトリ名やモデル名を呼び名にしてしまう。
+    明示の言い方だけを対象にし、無ければ空を返す（推測しない）。
+    """
+    for pattern in USER_NAME_PATTERNS:
+        for match in pattern.finditer(text):
+            name = _clean_name(match.group(1))
+            if name:
+                return name
+    return ""
+
+
+def _memory_name(home: Path) -> str:
+    """memory.db の user / preference から明示された呼び名を探す（新しい順）。"""
+    db = memory_db_path(home)
+    if not db.exists():
+        return ""
+    rows = None
+    for uri, kw in ((f"file:{db}?mode=ro", {"uri": True}), (str(db), {})):
+        con = None
+        try:
+            con = sqlite3.connect(uri, timeout=10, **kw)
+            rows = con.execute(
+                "select content from memories where category in ('user', 'preference') "
+                "order by created_at desc limit 200"
+            ).fetchall()
+            break
+        except sqlite3.Error:
+            rows = None
+        finally:
+            if con is not None:
+                con.close()
+    for (content,) in rows or ():
+        name = _name_from_text(str(content or ""))
+        if name:
+            return name
+    return ""
+
+
+def _user_name_source(home: Path) -> Tuple[str, str]:
+    """呼び名と、その出所。明示ファイル → ユーザーメモリ → memory.db の順。"""
+    explicit = home / "dreams" / "user.md"
+    try:
+        text = explicit.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if text:
+        name = _clean_name(_unquote_scalar(_frontmatter_fields(text).get("name", "")))
+        if name:
+            return name, "dreams/user.md"
+    for filename in ("USER.md", "MEMORY.md"):
+        path = home / "memories" / filename
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        name = _name_from_text(text)
+        if name:
+            return name, f"memories/{filename}"
+    name = _memory_name(home)
+    if name:
+        return name, "memory.db"
+    return "", ""
+
+
+def _user_name(home: Path) -> str:
+    """本文で使う呼び名。どこにも記録が無ければ空（書き手は「ユーザー」と書く）。"""
+    return _user_name_source(home)[0]
 
 
 def _person_memory(day: str, home: Path) -> List[str]:
@@ -1363,6 +1454,7 @@ def write_skeleton(
         "backup_path": str(backup_path) if backup_path else None,
         "flow": list(FLOW),
         "user_name": _user_name(home) or None,
+        "user_name_source": _user_name_source(home)[1] or None,
         "counts_filled": bool(sessions_text or messages_text),
         "message": "frontmatter だけ置いた。素材を読み、見出しを立てずに散文で本文を書くこと。",
     }

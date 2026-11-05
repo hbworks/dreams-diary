@@ -1,6 +1,6 @@
 name: dreams-diary
 label: Dreams Diary (自己日記)
-version: 2.0.0
+version: 2.0.1
 description: >-
   Agents keep a nightly diary of their own day. Material (sessions, tools, commits,
   memory writes, recurring words), a prose body with no headings, a validator that

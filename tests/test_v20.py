@@ -49,6 +49,71 @@ def make_profile(root: Path, name: str | None = None) -> Path:
     return home
 
 
+class UserNameTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _home(self) -> Path:
+        home = make_profile(self.root)
+        (home / "memories").mkdir(exist_ok=True)
+        return home
+
+    def test_explicit_file_wins_over_memory_files(self):
+        home = self._home()
+        (home / "dreams").mkdir(parents=True, exist_ok=True)
+        (home / "dreams" / "user.md").write_text("---\nname: まゆ\n---\n", encoding="utf-8")
+        (home / "memories" / "USER.md").write_text("ユーザーの名前は「すと」。\n", encoding="utf-8")
+        self.assertEqual(core._user_name_source(home), ("まゆ", "dreams/user.md"))
+
+    def test_user_memory_file_is_used(self):
+        home = self._home()
+        (home / "memories" / "USER.md").write_text(
+            "User prefers short answers.\n§\nユーザーの呼び名は「まゆ」です。\n", encoding="utf-8"
+        )
+        self.assertEqual(core._user_name_source(home), ("まゆ", "memories/USER.md"))
+        self.assertIn("- 呼び名: まゆ", core._person_material(DAY, home))
+
+    def test_memory_md_is_used_next(self):
+        home = self._home()
+        (home / "memories" / "MEMORY.md").write_text("name: まゆ\n", encoding="utf-8")
+        self.assertEqual(core._user_name_source(home), ("まゆ", "memories/MEMORY.md"))
+
+    def test_memory_db_is_the_last_source(self):
+        home = self._home()
+        con = sqlite3.connect(home / "memory.db")
+        con.execute(
+            "insert into memories (category, content, created_at) values (?, ?, ?)",
+            ("user", "ユーザーの名前は「まゆ」", "2026-10-01 10:00:00"),
+        )
+        con.commit()
+        con.close()
+        self.assertEqual(core._user_name_source(home), ("まゆ", "memory.db"))
+
+    def test_sentences_without_an_explicit_name_give_nothing(self):
+        home = self._home()
+        (home / "memories" / "USER.md").write_text(
+            "User prefers direct summaries.\nユーザーは日本語話者。\n", encoding="utf-8"
+        )
+        self.assertEqual(core._user_name_source(home), ("", ""))
+        self.assertIn("呼び名: （未設定", core._person_material(DAY, home))
+
+    def test_agent_handle_and_placeholders_are_rejected(self):
+        home = self._home()
+        (home / "memories" / "USER.md").write_text("ユーザー名は「@coding」\n", encoding="utf-8")
+        self.assertEqual(core._user_name_source(home), ("", ""))
+        (home / "memories" / "USER.md").write_text("ユーザーの名前は「ユーザー」\n", encoding="utf-8")
+        self.assertEqual(core._user_name_source(home), ("", ""))
+
+    def test_honorific_is_stripped(self):
+        home = self._home()
+        (home / "memories" / "USER.md").write_text("ユーザーの名前はまゆさん。\n", encoding="utf-8")
+        self.assertEqual(core._user_name(home), "まゆ")
+
+
 class PersonMaterialTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
