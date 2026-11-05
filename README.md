@@ -12,9 +12,9 @@ validator, and an index. The prose is written by the agent itself, in its own vo
 | Tool | Purpose |
 | :--- | :--- |
 | `dreams_material` | Material pack for a date: sessions/timestamps, tool usage, user utterances, `git log` across `~/Dev/git` (recursive, depth 3), and memory rows added that day. Also saved to `dreams/_material/<date>.md` — the saved file holds the full text, and a successful text response (including its locator or truncation notice) stays within `max_chars`. A budget too small for the notice returns an error. |
-| `dreams_write` | Creates `<date>.md` with frontmatter and the six section headings only. Never overwrites unless `force=true`; overwriting a file that already has prose keeps the old copy beside it as `<date>.md.bak`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). |
-| `dreams_validate` | Requires dated frontmatter, checks the six sections, rejects the second person (`あなた`), reports the prose char count (frontmatter and headings excluded; warns under 800 / over 3000), and verifies that **commit hashes written in a commit context actually exist** in a local repo. |
-| `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day one-line send-off, newest first). |
+| `dreams_write` | Creates `<date>.md` with frontmatter only (no headings — the body is prose, v2.0). Never overwrites unless `force=true`; overwriting a file that already has prose keeps the old copy beside it as `<date>.md.bak`. Pass `sessions` / `messages` from the material to start the file already valid; omit them and the fields stay blank (no guessed zeros). Returns the paragraph flow and the configured user name. |
+| `dreams_validate` | Requires dated frontmatter, rejects the second person (`あなた`), reports the prose char count (frontmatter and headings excluded; warns under 800 / over 3000), and verifies that **commit hashes written in a commit context actually exist** in a local repo. Section headings are no longer required. |
+| `dreams_index` | Rebuilds `dreams/INDEX.md` (per-day excerpt = the last paragraph, newest first). |
 
 ## Data layout — one diary per agent
 
@@ -22,9 +22,11 @@ Every profile gets its own directory and its own data. Nothing is shared.
 
 ```
 ~/.hermes/profiles/<profile>/dreams/
-├── YYYY-MM-DD.md          the diary
-├── INDEX.md               generated index
+├── YYYY-MM-DD.md          the diary (prose, no headings)
+├── INDEX.md               generated index (last-paragraph excerpt)
 ├── persona.md             optional: this agent's voice instructions
+├── user.md                optional: who the writer is writing about
+│                          `---\nname: まゆ\n---` — used as the form of address
 └── _material/YYYY-MM-DD.md  raw material used for that day
 ```
 
@@ -107,8 +109,8 @@ to copy verbatim. Keep the one-cron-per-profile convention unless you intentiona
 
 ### One source for the prompt
 
-`templates/cron-prompt.md` holds the prose; the six headings and the length floor are injected from
-`main.py` (`SECTIONS`, `MIN_CHARS_SOFT`) through `{{SECTIONS}}` / `{{MIN_CHARS}}`. Do not write either
+`templates/cron-prompt.md` holds the prose; the paragraph flow and the length floor are injected from
+`main.py` (`FLOW`, `MIN_CHARS_SOFT`) through `{{FLOW}}` / `{{MIN_CHARS}}`. Do not write either
 into the prose: each cron job stores its own copy of the rendered text, so a duplicated number goes
 stale in one copy at a time. Lines starting with `<!--` are editor notes and are stripped on render.
 
@@ -155,8 +157,15 @@ because they never match the diary filename and would otherwise drop out of the 
 
 ### What the material contains
 
-The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## 会話` → `## 自分の発言（応答の本文・抜粋）` →
+The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検証）` → `## この人のこと（直近14日の機械抽出）` → `## 会話` → `## 自分の発言（応答の本文・抜粋）` →
 `## 成功した操作` → `## ツールの失敗（原因は未確認）` → `## コミット` → `## この日 memory に追加された項目`.
+
+- **この人のこと（直近14日の機械抽出）** is material for writing *who the user is*, not a verdict.
+  It carries the configured name (`dreams/user.md`), the `user` / `preference` memory rows added in
+  the last 14 days (10 max, 120 chars each), and the words that recurred on 3+ days — katakana words
+  and kanji compounds only, ranked by the number of days, `- 「語」N日`. Mechanism-cut 2–4 character
+  n-grams were rejected: they produce `me`, `ージ`, `認し` fragments that say nothing about a person.
+  With no material at all the section prints `（直近14日に材料は無い）`.
 
 - **自分の発言（応答の本文・抜粋）** lists the day's assistant messages that have body text,
   one line each as `- HH:MM 応答: excerpt`. Titles are not enough to know what was actually
@@ -168,9 +177,10 @@ The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検
   It exists because the commit section cannot see terminal edits: this is the only place a day
   spent in `sed` / `git mv` / heredocs shows up as work. A day with no such calls omits the section.
 
-- **前日の自己申告（未検証）** reads back only sections 5 (借りているもの) and 6 (明日の自分へ)
-  of the most recent earlier diary, capped at 600 characters, labelled with its filename and date
-  and the note that it is not a fact. Sections 1–4 are never copied; the diary body is not reused.
+- **前日の自己申告（未検証）** reads back the most recent earlier diary's **last paragraph** (the
+  day's send-off), capped at 600 characters, labelled with its filename and date and the note that
+  it is not a fact. For a legacy six-section diary that paragraph is `## 明日の自分へ`; the rest of
+  the body is never copied.
 - **ツールの失敗（原因は未確認）** lists tool results in the day's window that failed in a known
   shape: `terminal` with a non-zero `exit_code` or a non-empty `error`; `patch` / `write_file`
   with `success: false` or an `error`; `read_file` with `not_found: true`; any other tool with a
@@ -259,23 +269,32 @@ The third digit is for fixes: bug fixes, behaviour corrections, and small harden
 (`1.3.0` → `1.3.1`). Reserve the second digit for new capability, so a stream of repairs does not
 inflate the version. `plugin.yaml` is the source of truth and `git tag v<version>` marks releases.
 
-## The six sections
+## The diary body
 
-1. 今日、何を見ていたか — factual, with times
-2. 考えたこと — the agent's own reasoning
-3. 間違えたこと — with the real cause
-4. 勘違いしているかもしれないこと — guesses quarantined here
-5. 借りているもの — unfinished work
-6. 明日の自分へ — two sentences or more, carrying the orders tomorrow needs
+No headings. The body is prose in three paragraphs (a fourth is optional), and `main.py`'s `FLOW`
+carries the same description into the prompt:
+
+1. what the user was doing today and **what kind of person they looked like** — quote one utterance
+   with its time, and state how sure you are (「かなり確信している」／「まだ手探り」)
+2. what you decided, where you were wrong, and **what that cost the user** (made them wait, redo it,
+   or spend effort on your behalf)
+3. what you will do first tomorrow, in order (1–3 items)
+4. (optional) what you are still unsure about
+
+Legacy six-section diaries stay valid: the validator no longer requires headings, and the index and
+the next day's material read the **last paragraph**, which for a legacy diary is `## 明日の自分へ`.
+
+The name comes from `dreams/user.md` (`name:` in the frontmatter); without it the writer says
+「ユーザー」. The name is never guessed from the material or memory. `あなた` is still an error.
 
 ## Validator rules
 
 - `missing_frontmatter` / `missing_frontmatter_field` (error) — requires a delimited frontmatter block with `date`, `author`, `sessions`, `messages`, and `commit`.
 - `invalid_frontmatter_date` / `frontmatter_date_mismatch` (error) — `date` must be a real `YYYY-MM-DD` date matching the diary filename.
 - `invalid_frontmatter_field` (error) — `author` must be non-empty, `sessions` and `messages` must be non-negative integers, and `commit` must be a non-empty scalar or list. Hash-shaped tokens in quoted, comma-separated, or block-list commit values are verified too.
-- `missing_section` (error) — one of the six headings is absent.
-- `second_person` (error) — `あなた` appears outside a closed quotation. Refer to the human as
-  `ユーザー`, quote or report what they said (`「〜と言っていた」`), never assert their inner state.
+- `second_person` (error) — `あなた` appears outside a closed quotation. Refer to the human by the
+  configured name (`dreams/user.md`) or as `ユーザー`, quote or report what they said
+  (`「〜と言っていた」`), and never assert their inner state.
   Spans inside `「…」`, `『…』`, `“…”` and `"…"` are not flagged, because quoting the user's own
   words is the recommended form; an unclosed quote is *not* stripped, so it cannot be used to hide
   the word.
@@ -347,7 +366,7 @@ cron の `script` は、現在のプロフィールの `HERMES_HOME/scripts/` �
 
 共通 cron プロンプトは `templates/cron-prompt.md`、任意の声の記入用ひな形は
 `templates/persona.md` です。枠だけを共有し、内容はプロフィールごとに書き分けます。
-見出しと字数の下限は `main.py` の `SECTIONS` / `MIN_CHARS_SOFT` から `{{SECTIONS}}` /
+見出しと字数の下限は `main.py` の `FLOW` / `MIN_CHARS_SOFT` から `{{FLOW}}` /
 `{{MIN_CHARS}}` として注入されるので、散文側に書き写さないでください。ジョブはプロンプトを
 自分で保持するため、テンプレートを直しただけでは届きません。`python3 cli.py prompt --check` で
 差分（読み取りのみ、差分があれば exit 1）、`python3 cli.py prompt --apply --profile <p>` で
@@ -367,10 +386,16 @@ cron では pre-run 素材にある `日記ファイル:` の絶対パスを使�
 `cli.py validate [YYYY-MM-DD]` は手動検査や pipeline で使えます。`--path FILE` で日記ファイルを
 直接指定できます（`-2` / `-3` の別名ファイルを検査するときに必要）。
 
-### 素材の内容と限界（v1.6）
+### 素材の内容と限界（v2.0）
 
-素材は `前回の日記の検証 → 前日の自己申告（未検証） → 会話 → 自分の発言（応答の本文・抜粋） → 成功した操作 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
-前日の日記から読み戻すのは第5・6節だけで、600字まで。事実ではなく未検証の自己申告として置きます。
+素材は `前回の日記の検証 → 前日の自己申告（未検証） → この人のこと（直近14日の機械抽出） → 会話 → 自分の発言（応答の本文・抜粋） → 成功した操作 → ツールの失敗（原因は未確認） → コミット → memory` の順です。
+前日の日記から読み戻すのは**最終段落**（散文なら申し送り、旧6節なら「明日の自分へ」の中身）だけで、
+600字まで。事実ではなく未検証の自己申告として置きます。
+
+`## この人のこと` は、呼び名（`dreams/user.md` の `name:`）、直近14日の memory のうち
+`user` / `preference` の項目（10件まで、各120字）、3日以上に出た語（カタカナ語と漢語だけ、
+出現日数の順、`- 「語」N日`）を並べます。機械抽出であって人物像の断定ではありません。
+2〜4文字の機械的な n-gram は「me」「ージ」「認し」のような断片になるため採りません。
 
 `## 自分の発言` は、その日の assistant メッセージのうち本文を持つものを `- HH:MM 応答: 抜粋` で並べます。
 会話節は応答の件数しか持たないため、何を返したかはここにしかありません。セッションごとに最後の応答だけ

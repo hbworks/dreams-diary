@@ -126,11 +126,13 @@ def make_repo_with_two_commits(root: Path) -> tuple[Path, str, str]:
 
 
 def _good_diary(day: str = DAY, commit: str = "none") -> str:
+    # v2.0: 本文は見出しを持たない散文。`本文。検証用の文章をここに置く。` は差し替え用の目印。
     return (
         f"---\ndate: {day}\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: {commit}\n---\n\n"
         f"# {day}\n\n"
-        + "\n\n".join(f"{s}\n本文。検証用の文章をここに置く。" for s in core.SECTIONS)
-        + "\n"
+        "本文。検証用の文章をここに置く。ユーザーは「そこは残して」と言っていて、"
+        "その一言で優先順位が決まった。\n\n"
+        "明日は、切り詰めのテストを先に流してから本文の上限を触る。\n"
     )
 
 
@@ -261,15 +263,23 @@ class SelfReportMaterialTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_only_sections_five_and_six_are_read_back(self):
+    def test_only_the_final_paragraph_is_read_back(self):
         home = make_profile(self.root)
         prev = home / "dreams" / "2026-10-04.md"
         prev.parent.mkdir(parents=True)
         markers = [f"第{i}節の本文マーカー{i}" for i in range(1, 7)]
+        headings = (
+            "## 今日、何を見ていたか",
+            "## 考えたこと",
+            "## 間違えたこと",
+            "## 勘違いしているかもしれないこと",
+            "## 借りているもの",
+            "## 明日の自分へ",
+        )
         prev.write_text(
             "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
             f"# 2026-10-04\n\n"
-            + "\n\n".join(f"{s}\n{m}" for s, m in zip(core.SECTIONS, markers))
+            + "\n\n".join(f"{s}\n{m}" for s, m in zip(headings, markers))
             + "\n",
             encoding="utf-8",
         )
@@ -277,10 +287,26 @@ class SelfReportMaterialTests(unittest.TestCase):
         self.assertIn("## 前日の自己申告（未検証）", material)
         section = _section(material, "## 前日の自己申告（未検証）")
         self.assertIn("2026-10-04.md", section)
-        self.assertIn(markers[4], section)
+        # 旧形式では最終段落＝「## 明日の自分へ」の中身だけを引き継ぐ
         self.assertIn(markers[5], section)
-        for marker in markers[:4]:
+        for marker in markers[:5]:
             self.assertNotIn(marker, material)
+
+    def test_prose_diary_reads_back_its_last_paragraph(self):
+        home = make_profile(self.root)
+        prev = home / "dreams" / "2026-10-04.md"
+        prev.parent.mkdir(parents=True)
+        prev.write_text(
+            "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
+            f"# 2026-10-04\n\n"
+            "最初の段落マーカー。\n\n"
+            "明日まずするのは、切り詰めのテストを流すこと。\n",
+            encoding="utf-8",
+        )
+        material = core.collect_material(DAY, home=home, repos=[])["material"]
+        section = _section(material, "## 前日の自己申告（未検証）")
+        self.assertIn("明日まずするのは、切り詰めのテストを流すこと。", section)
+        self.assertNotIn("最初の段落マーカー。", section)
 
     def test_missing_previous_diary_is_marked(self):
         home = make_profile(self.root)

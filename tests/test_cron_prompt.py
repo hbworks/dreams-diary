@@ -38,11 +38,11 @@ def _write_jobs(path: Path, prompt: str, name: str = "dreams-diary", job_id: str
 
 
 class RenderTests(unittest.TestCase):
-    def test_sections_are_injected_in_order(self):
+    def test_flow_is_injected_in_order(self):
         text = core.render_cron_prompt()
-        positions = [text.index(heading) for heading in core.SECTIONS]
+        positions = [text.index(item) for item in core.FLOW]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("## 明日の自分へ", text)
+        self.assertNotIn("{{SECTIONS}}", text)
 
     def test_no_token_remains(self):
         self.assertNotIn("{{", core.render_cron_prompt())
@@ -59,8 +59,8 @@ class RenderTests(unittest.TestCase):
 
     def test_template_does_not_restate_the_rules(self):
         raw = TEMPLATE.read_text(encoding="utf-8")
-        for heading in core.SECTIONS:
-            self.assertNotIn(heading, raw, f"見出しが散文へ再重複している: {heading}")
+        for item in core.FLOW:
+            self.assertNotIn(item, raw, f"流れの説明が散文へ再重複している: {item[:20]}")
         self.assertNotIn("800", raw, "字数の下限が散文へ再重複している")
 
     def test_prompt_requires_session_times(self):
@@ -88,13 +88,14 @@ class RenderTests(unittest.TestCase):
         """根拠が薄い判断も、自分が決めたことなら第2節に書ける（素材の範囲に閉じ込めない）。"""
         text = core.render_cron_prompt()
         self.assertIn("判断は自分のものとして書く", text)
-        self.assertIn("薄さごと第2節に書いてよい", text)
+        self.assertIn("薄さごと書いてよい", text)
 
-    def test_readme_section_list_matches_the_two_sentence_rule(self):
-        """README の節一覧が「一行」と言い、テンプレートが「2文以上」と言う食い違いを防ぐ。"""
+    def test_readme_describes_the_prose_body(self):
+        """README が6節を要求したまま（散文の本文と食い違って）残らないようにする。"""
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("## The diary body", readme)
+        self.assertNotIn("missing_section", readme)
         self.assertNotIn("明日の自分へ — one line", readme)
-        self.assertIn("two sentences or more", readme)
 
     def test_missing_token_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,7 +107,7 @@ class RenderTests(unittest.TestCase):
     def test_unknown_token_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "prompt.md"
-            broken.write_text("{{SECTIONS}}\n{{MIN_CHARS}}\n{{NOPE}}\n", encoding="utf-8")
+            broken.write_text("{{FLOW}}\n{{MIN_CHARS}}\n{{NOPE}}\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 core.render_cron_prompt(broken)
 
@@ -176,7 +177,7 @@ class CheckTests(unittest.TestCase):
             code = cli_mod.main(["prompt"])
         self.assertEqual(code, 0)
         self.assertEqual(err.getvalue(), "")
-        self.assertIn(core.SECTIONS[0], out.getvalue())
+        self.assertIn(core.FLOW[0][:20], out.getvalue())
 
     def test_mode_flags_are_rejected_outside_prompt(self):
         err = io.StringIO()

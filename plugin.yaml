@@ -1,10 +1,10 @@
 name: dreams-diary
 label: Dreams Diary (自己日記)
-version: 1.5.4
+version: 2.0.0
 description: >-
   Agents keep a nightly diary of their own day. Material (sessions, tools, commits,
-  memory writes), a six-section skeleton, a validator that catches fabricated commit
-  hashes, and an index. Per-profile storage: <profile>/dreams/.
+  memory writes, recurring words), a prose body with no headings, a validator that
+  catches fabricated commit hashes, and an index. Per-profile storage: <profile>/dreams/.
 author: masato
 provides_tools:
   - dreams_material

@@ -4,10 +4,11 @@
 方針: プラグインは素材と検査だけを担う。文章はエージェント本人が書く。
 
 データはプロファイルごとに独立:
-    <profile_home>/dreams/YYYY-MM-DD.md       日記
+    <profile_home>/dreams/YYYY-MM-DD.md       日記（見出しの無い散文。docs/SPEC-v2.0.md）
     <profile_home>/dreams/_material/<date>.md 素材
     <profile_home>/dreams/INDEX.md            目次
     <profile_home>/dreams/persona.md          任意。そのエージェントの声の指示
+    <profile_home>/dreams/user.md             任意。ユーザーの呼び名（name: 1行）
 """
 
 from __future__ import annotations
@@ -33,13 +34,36 @@ except ImportError:  # CLI and tests import main as a top-level module
     from scripts.dreams_diary_paths import profile_home as _profile_home
     from scripts.dreams_diary_paths import root_from_home as _root_from_home
 
-SECTIONS = (
-    "## 今日、何を見ていたか",
-    "## 考えたこと",
-    "## 間違えたこと",
-    "## 勘違いしているかもしれないこと",
-    "## 借りているもの",
-    "## 明日の自分へ",
+# 本文は見出しを持たない散文（docs/SPEC-v2.0.md）。この流れはプロンプトへ注入するだけで、
+# 検査には使わない。節の有無を error にすると、日記は報告書の形へ戻ってしまう。
+FLOW = (
+    "1. 今日、ユーザーが何をしていて、どんな人だと見えたか。その日の発言を1つ、時刻つきで"
+    "引用し、根拠にする。人物像は「確信している」「まだ手探り」のように、確信の段階ごと書く。",
+    "2. 自分が決めたこと・間違えたこと。原因だけで終わらせず、そのせいでユーザーに何を"
+    "させたか（待たせた、やり直させた、手間をかけさせた）を書く。",
+    "3. 明日まずすること。順序が分かる形で1〜3件。",
+    "4. （任意）分からないまま抱えていること。",
+)
+
+# 素材 `## この人のこと` の抽出条件（docs/SPEC-v2.0.md D）。
+PERSON_WINDOW_DAYS = 14
+PERSON_MEMORY_MAX_ITEMS = 10
+PERSON_MEMORY_CHARS = 120
+PERSON_PHRASE_MIN_DAYS = 3
+PERSON_PHRASE_MAX_ITEMS = 10
+# 語彙の材料にならない機能語。ここに無い語でも、助詞だけの語は後段で落とす。
+PHRASE_STOPWORDS = frozenset(
+    """です ます ました ません でした した して する してる ている ある あり いる ない いて
+    から まで より など ので けど でも のは のが のに には では とは への との こと もの
+    ところ よう そう これ それ あれ どれ ここ そこ どこ この その あの どの という といい
+    ください お願い ありがとう すみません 大丈夫 かも ですね ますね ですか ますか って てい
+    てお され させ せる られ れる わた くだ さい いま まだ もう ずっ とても ちょっ""".split()
+)
+# 語として切り出す単位。2〜4文字の n-gram を機械的に切ると「me」「ージ」「認し」のような
+# 断片が並び、人物像の材料にならない。カタカナ語と漢語のまとまりだけを拾う。
+PERSON_PHRASE_PATTERNS = (
+    re.compile(r"[ァ-ヶー]{2,8}"),
+    re.compile(r"[一-龠]{2,4}"),
 )
 
 DEFAULT_MAX_MATERIAL = 14000
@@ -440,6 +464,142 @@ def _memory_material(day: str, home: Path) -> str:
     return "\n".join(f"- [{c}] {_clip(t, 160)}" for c, t in rows) + "\n"
 
 
+def _user_name(home: Path) -> str:
+    """呼び名は `dreams/user.md` に書かれた名前だけを使う。
+
+    素材・記憶・会話から名前を推測すると、別人の名前や古い呼び方が本文へ入る。
+    ファイルが無い日は空を返し、書き手は「ユーザー」と書く。
+    """
+    path = home / "dreams" / "user.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return _unquote_scalar(_frontmatter_fields(text).get("name", "")).strip()
+
+
+def _person_memory(day: str, home: Path) -> List[str]:
+    """直近14日に memory へ入った user / preference の項目（新しい順）。"""
+    db = memory_db_path(home)
+    if not db.exists():
+        return []
+    start = (
+        datetime.datetime.strptime(day, "%Y-%m-%d")
+        - datetime.timedelta(days=PERSON_WINDOW_DAYS - 1)
+    ).strftime("%Y-%m-%d")
+    sql = (
+        "select category, content, date(created_at) as d from memories "
+        "where date(created_at) >= date(?) and date(created_at) <= date(?) "
+        "and category in ('user', 'preference') order by created_at desc limit ?"
+    )
+    rows = None
+    for uri, kw in ((f"file:{db}?mode=ro", {"uri": True}), (str(db), {})):
+        con = None
+        try:
+            con = sqlite3.connect(uri, timeout=10, **kw)
+            rows = con.execute(sql, (start, day, PERSON_MEMORY_MAX_ITEMS)).fetchall()
+            break
+        except sqlite3.Error:
+            rows = None
+        finally:
+            if con is not None:
+                con.close()
+    if not rows:
+        return []
+    return [f"- {str(d)[5:]} [{c}] {_clip(t, PERSON_MEMORY_CHARS)}" for c, t, d in rows]
+
+
+def _user_messages_by_day(day: str, home: Path) -> Dict[str, List[str]]:
+    """直近14日のユーザー発言を日付ごとに。注入文脈は除く。"""
+    db = state_db_path(home)
+    if not db.exists():
+        return {}
+    start = (
+        datetime.datetime.strptime(day, "%Y-%m-%d")
+        - datetime.timedelta(days=PERSON_WINDOW_DAYS - 1)
+    ).timestamp()
+    _, end = _day_bounds(day)
+    rows = None
+    for uri, kw in ((f"file:{db}?mode=ro", {"uri": True}), (str(db), {})):
+        con = None
+        try:
+            con = sqlite3.connect(uri, timeout=10, **kw)
+            rows = con.execute(
+                "select content, timestamp from messages where role = 'user' "
+                "and content is not null and length(trim(content)) > 0 "
+                "and timestamp >= ? and timestamp < ? order by timestamp",
+                (start, end),
+            ).fetchall()
+            break
+        except sqlite3.Error:
+            rows = None
+        finally:
+            if con is not None:
+                con.close()
+    if not rows:
+        return {}
+    out: Dict[str, List[str]] = collections.defaultdict(list)
+    for content, when in rows:
+        message = _clip(content, USER_MSG_CHARS)
+        if message.startswith(INJECTED_PREFIXES):
+            continue
+        out[datetime.datetime.fromtimestamp(when).strftime("%Y-%m-%d")].append(message)
+    return dict(out)
+
+
+def _person_phrases(day: str, home: Path) -> List[str]:
+    """繰り返し出た語（カタカナ語・漢語、3日以上に出現）。機械抽出で決定的。"""
+    by_day = _user_messages_by_day(day, home)
+    if not by_day:
+        return []
+    day_sets: Dict[str, set] = collections.defaultdict(set)
+    totals: "collections.Counter[str]" = collections.Counter()
+    for date_key, messages in by_day.items():
+        for message in messages:
+            text = re.sub(r"\s+", "", message)
+            for pattern in PERSON_PHRASE_PATTERNS:
+                for token in pattern.findall(text):
+                    if token in PHRASE_STOPWORDS:
+                        continue
+                    day_sets[token].add(date_key)
+                    totals[token] += 1
+    ranked = [
+        (len(days), totals[token], token)
+        for token, days in day_sets.items()
+        if len(days) >= PERSON_PHRASE_MIN_DAYS
+    ]
+    ranked.sort(key=lambda item: (-item[0], -len(item[2]), -item[1], item[2]))
+    picked: List[Tuple[str, int]] = []
+    for days_seen, _, token in ranked:
+        if any(token in chosen or chosen in token for chosen, _ in picked):
+            continue  # 採用済みの語と重なる断片は落とす
+        picked.append((token, days_seen))
+        if len(picked) >= PERSON_PHRASE_MAX_ITEMS:
+            break
+    return [f"- 「{token}」{days_seen}日" for token, days_seen in picked]
+
+
+def _person_material(day: str, home: Path) -> str:
+    """その人がどんな人かを組み立てる材料。断定は書き手がする。"""
+    name = _user_name(home)
+    lines = ["機械抽出。人物像の断定ではなく材料。"]
+    if name:
+        lines.append(f"- 呼び名: {name}")
+    else:
+        lines.append("- 呼び名: （未設定。本文では「ユーザー」と書く）")
+    memory = _person_memory(day, home)
+    if memory:
+        lines.append("### memory（user / preference）")
+        lines.extend(memory)
+    phrases = _person_phrases(day, home)
+    if phrases:
+        lines.append("### よく出る言い方")
+        lines.extend(phrases)
+    if not memory and not phrases:
+        lines.append("（直近14日に材料は無い）")
+    return "\n".join(lines) + "\n"
+
+
 REPO_SCAN_MAX_DEPTH = 5
 REPO_SCAN_DEEP_DEPTH = 8
 REPO_SCAN_SKIP = {"node_modules", "venv", "__pycache__", "site-packages", "build", "dist"}
@@ -670,15 +830,45 @@ def _failures_material(day: str, home: Path) -> str:
 
 
 def _section_text(text: str, heading: str) -> str:
-    """日記から見出し節の本文だけを取り出す（次の `## ` まで）。"""
+    """日記から見出し節の本文だけを取り出す（次の `## ` まで）。旧形式の日記用。"""
     match = re.search(
         rf"^{re.escape(heading)}[ \t]*\n(.*?)(?=^## |\Z)", text, re.S | re.M
     )
     return match.group(1).strip() if match else ""
 
 
+def _last_paragraph(text: str) -> str:
+    """本文の最終段落（空行区切りの最後の、散文を含むブロック）。
+
+    散文の日記では申し送りがそのまま最終段落になる。旧形式（6節）では
+    「## 明日の自分へ」ブロックが最後なので、先頭の見出し行を落として中身を返す。
+    どちらの形式でも「その日の最後に書かれた本文」になる。
+    """
+    body = _body_text(text)
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", body) if block.strip()]
+
+    def has_prose(block: str) -> bool:
+        return any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in block.splitlines()
+        )
+
+    while blocks and not has_prose(blocks[-1]):
+        blocks.pop()  # 見出しだけのブロックは段落ではない
+    if not blocks:
+        return ""
+    lines = blocks[-1].splitlines()
+    while lines and lines[0].lstrip().startswith("#"):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def _self_report_material(day: str, home: Path) -> str:
-    """前日の第5・6節を、未検証の自己申告として読む（第1〜4節は入れない）。"""
+    """前日の申し送り（最終段落）を、未検証の自己申告として読む。
+
+    v2.0 の散文日記では最終段落がそのまま「明日まずすること」になる。旧形式では
+    「## 明日の自分へ」の中身が最終段落なので、同じ抜き方で両方を扱える。
+    """
     try:
         previous = _previous_diary(day, home)
     except OSError:
@@ -695,9 +885,8 @@ def _self_report_material(day: str, home: Path) -> str:
         f"- ファイル: {previous.name} / 日付: {date}",
         "- 注記: 事実として引き継がない。今日の素材で裏が取れたものだけ「返した／まだ」と書く",
     ]
-    for heading, label in ((SECTIONS[4], "第5節"), (SECTIONS[5], "第6節")):
-        body = _section_text(text, heading)
-        lines.append(f"{label}: {body if body else '（無し）'}")
+    body = _last_paragraph(text)
+    lines.append(f"前日の申し送り: {body if body else '（無し）'}")
     return _fit("\n".join(lines) + "\n", SELF_REPORT_MAX_CHARS, "\n（600字で切った）\n")
 
 
@@ -911,6 +1100,7 @@ def collect_material(
         f"## 前回の日記の検証\n{_gate_material(day, home, repos)}\n"
     )
     self_report = _self_report_material(day, home)
+    person = _person_material(day, home)
     conversation = _sessions_material(day, home)
     own = _own_statements_material(day, home)
     successes = _successful_operations_material(day, home)
@@ -919,6 +1109,7 @@ def collect_material(
     commits = _commits_material(day, repos, edited)
     memory = _memory_material(day, home)
     self_head = "## 前日の自己申告（未検証）\n"
+    person_head = "\n## この人のこと（直近14日の機械抽出）\n"
     conv_head = "## 会話\n"
     own_head = "\n## 自分の発言（応答の本文・抜粋）\n"
     fail_head = "\n## ツールの失敗（原因は未確認）\n"
@@ -928,6 +1119,8 @@ def collect_material(
         header
         + self_head
         + self_report
+        + person_head
+        + person
         + conv_head
         + conversation
         + own_head
@@ -992,6 +1185,8 @@ def collect_material(
         fixed = (
             len(header)
             + len(self_head)
+            + len(person_head)
+            + len(person)
             + len(conv_head)
             + len(own_head)
             + len(own)
@@ -1022,6 +1217,8 @@ def collect_material(
                 header
                 + self_head
                 + _fit(self_report, self_budget, "\n（前日の自己申告は上限で切り詰めた）\n")
+                + person_head
+                + person
                 + conv_head
                 + _fit(conversation, conv_budget, "\n（会話は上限で切り詰めた）\n")
                 + own_head
@@ -1155,9 +1352,7 @@ def write_skeleton(
         f"messages:{messages_field}\n"
         "commit: none\n"
         "---\n\n"
-        f"# {day}\n\n"
-        + "\n\n".join(f"{s}\n" for s in SECTIONS)
-        + "\n"
+        f"# {day}\n"
     )
     path.write_text(text, encoding="utf-8")
     persona = ddir / "persona.md"
@@ -1166,9 +1361,10 @@ def write_skeleton(
         "path": str(path),
         "persona_path": str(persona) if persona.exists() else None,
         "backup_path": str(backup_path) if backup_path else None,
-        "sections": list(SECTIONS),
+        "flow": list(FLOW),
+        "user_name": _user_name(home) or None,
         "counts_filled": bool(sessions_text or messages_text),
-        "message": "節見出しだけ置いた。素材を読み、自分の声で各節を埋めること。",
+        "message": "frontmatter だけ置いた。素材を読み、見出しを立てずに散文で本文を書くこと。",
     }
 
 
@@ -1372,20 +1568,21 @@ def _outside_quotes(text: str) -> str:
     return QUOTED_SPAN.sub("", text)
 
 
-def _section_issues(text: str) -> List[Dict[str, str]]:
-    """6節の欠落と二人称の混入。
+def _voice_issues(text: str) -> List[Dict[str, str]]:
+    """二人称の混入だけを見る（節の有無は v2.0 で検査しない）。
 
     「あなた」の検査は引用符の外側だけを見る。README が「引用か伝聞で書く」と案内して
     いるのに、引用したユーザー発言の中の「あなた」で error になると、正しい書き方が
     落ちる。閉じていない引用は除去しないので、逃げ道にはならない。
+    呼び名（`dreams/user.md` の name）は対象外。名前で呼ぶのは v2.0 の推奨。
     """
-    issues = [_issue("error", "missing_section", section) for section in SECTIONS if section not in text]
+    issues: List[Dict[str, str]] = []
     if "あなた" in _outside_quotes(text):
         issues.append(
             _issue(
                 "error",
                 "second_person",
-                "「あなた」は禁止。三人称『ユーザー』＋引用か伝聞で書く（引用符の中は対象外）。",
+                "「あなた」は禁止。呼び名か『ユーザー』＋引用か伝聞で書く（引用符の中は対象外）。",
             )
         )
     return issues
@@ -1507,7 +1704,7 @@ def validate_diary(
 
     issues = _frontmatter_issues(text, target)
 
-    issues += _section_issues(text)
+    issues += _voice_issues(text)
 
     body_chars, length_issues = _length_issues(text)
     issues += length_issues
@@ -1609,8 +1806,8 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
         return {"ok": False, "count": 0, "path": str(ddir / "INDEX.md")}
 
     def tail(text: str) -> str:
-        m = re.search(rf"{re.escape(SECTIONS[-1])}\n+(.+?)(?:\n## |\Z)", text, re.S)
-        return " ".join(m.group(1).split()) if m else ""
+        """目次の抜粋。散文では最終段落、旧6節では「明日の自分へ」の中身。"""
+        return " ".join(_last_paragraph(text).split())
 
     rows = []
     skipped: List[Dict[str, str]] = []
@@ -1674,7 +1871,7 @@ DREAMS_BRIDGE_SCRIPTS = (
     "dreams_diary_validate.py",
     "dreams_diary_paths.py",
 )
-_PROMPT_TOKENS = dict(SECTIONS=lambda: "\n".join(SECTIONS), MIN_CHARS=lambda: str(MIN_CHARS_SOFT))
+_PROMPT_TOKENS = dict(FLOW=lambda: "\n".join(FLOW), MIN_CHARS=lambda: str(MIN_CHARS_SOFT))
 _TOKEN = re.compile("{{([A-Z_]+)}}")
 
 

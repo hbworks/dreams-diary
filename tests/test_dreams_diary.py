@@ -22,6 +22,28 @@ import main as core  # noqa: E402
 
 DAY = "2026-10-05"
 
+# v2.0 の本文（見出しなしの散文）。検査は節を見ないので、本文は段落で作る。
+PROSE = (
+    "23:11、画面にはまだ差分が残っていた。ユーザーは「そこは残して」と言っていて、"
+    "その一言で優先順位が決まった。\n\n"
+    "最初は表示側だけ直せば足りると考えたが、再構築の経路を読むと固定費の計算も"
+    "同じだけずれていた。そのせいでユーザーには確認をもう一度させた。\n\n"
+    "明日は、切り詰めのテストを先に流してから本文の上限を触る。"
+)
+
+# 旧形式（6節）の本文。v2.0 でも有効なままであることを確かめるために置く。
+LEGACY_PROSE = "\n\n".join(
+    f"{heading}\n本文。"
+    for heading in (
+        "## 今日、何を見ていたか",
+        "## 考えたこと",
+        "## 間違えたこと",
+        "## 勘違いしているかもしれないこと",
+        "## 借りているもの",
+        "## 明日の自分へ",
+    )
+)
+
 
 def _ts(day: str, hh: int, mm: int = 0) -> float:
     return datetime.datetime.strptime(f"{day} {hh}:{mm:02d}", "%Y-%m-%d %H:%M").timestamp()
@@ -204,7 +226,7 @@ class MaterialTests(unittest.TestCase):
         prev.write_text(
             "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
             "commit: none\n---\n\n# 2026-10-04\n\n"
-            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + PROSE
             + "\n",
             encoding="utf-8",
         )
@@ -227,7 +249,7 @@ class MaterialTests(unittest.TestCase):
         (dreams / "2026-10-04.md").write_text(
             "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
             "commit: none\n---\n\n# 2026-10-04\n\n"
-            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + PROSE
             + "\n",
             encoding="utf-8",
         )
@@ -245,14 +267,14 @@ class MaterialTests(unittest.TestCase):
         (dreams / "2026-10-04.md").write_text(
             "---\ndate: 2026-10-04\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
             "commit: none\n---\n\n# 2026-10-04\n\n"
-            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + PROSE
             + "\n",
             encoding="utf-8",
         )
         (dreams / "2026-10-05.md").write_text("---\ndate: 2026-10-05\n---\n本文だけ。\n", encoding="utf-8")
         res = core.audit_diaries(home=self.home, days=5, repos=[self.repo])
-        self.assertEqual(res["warn_counts"], {"time_absent": 1, "too_short": 2})
-        self.assertEqual(res["error_counts"], {"missing_frontmatter_field": 1, "missing_section": 6})
+        self.assertEqual(res["warn_counts"], {"too_short": 2})
+        self.assertEqual(res["error_counts"], {"missing_frontmatter_field": 1})
 
     def test_audit_orders_variants_by_numeric_suffix(self):
         dreams = self.home / "dreams"
@@ -287,13 +309,13 @@ class SkeletonTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_skeleton_has_all_sections(self):
+    def test_skeleton_has_no_section_headings(self):
         res = core.write_skeleton(DAY, home=self.home)
         self.assertTrue(res["ok"])
         text = Path(res["path"]).read_text(encoding="utf-8")
-        for section in core.SECTIONS:
-            self.assertIn(section, text)
         self.assertIn(f"date: {DAY}", text)
+        self.assertNotIn("## ", text)
+        self.assertEqual(len(res["flow"]), len(core.FLOW))
 
     def test_refuses_overwrite(self):
         core.write_skeleton(DAY, home=self.home)
@@ -394,17 +416,13 @@ class ValidateTests(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return path
 
-    def _section_body(self) -> str:
-        return (
-            f"# {DAY}\n\n"
-            + "\n\n".join(f"{s}\n本文。（{self.sha}）" for s in core.SECTIONS)
-            + "\n"
-        )
+    def _prose_body(self) -> str:
+        return f"# {DAY}\n\n{PROSE}（{self.sha}）\n"
 
     def _good_body(self) -> str:
         return (
             f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
-            + self._section_body()
+            + self._prose_body()
         )
 
     def test_valid_entry_passes(self):
@@ -413,7 +431,7 @@ class ValidateTests(unittest.TestCase):
         self.assertTrue(res["ok"], res)
 
     def test_missing_frontmatter_fails(self):
-        self._write(self._section_body())
+        self._write(self._prose_body())
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertFalse(res["ok"], res)
         self.assertIn("missing_frontmatter", res["errors"])
@@ -439,15 +457,24 @@ class ValidateTests(unittest.TestCase):
         self.assertFalse(res["ok"], res)
         self.assertIn("invalid_frontmatter_field", res["errors"])
 
-    def test_missing_section_fails(self):
-        body = self._good_body().replace(core.SECTIONS[-1], "")
-        self._write(body)
+    def test_prose_without_headings_passes(self):
+        # v2.0: 本文は見出しを持たない散文。節の欠落はもう error ではない。
+        self._write(self._good_body())
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
-        self.assertFalse(res["ok"])
-        self.assertIn("missing_section", res["errors"])
+        self.assertNotIn("missing_section", res["errors"])
+        self.assertTrue(res["ok"], res)
+
+    def test_legacy_six_section_diary_still_passes(self):
+        # 既存の日記を遡及で壊さない（v2.0 は検査を減らすだけで、要求を増やさない）
+        self._write(
+            f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
+            f"commit: none\n---\n\n# {DAY}\n\n{LEGACY_PROSE}\n"
+        )
+        res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
+        self.assertTrue(res["ok"], res)
 
     def test_second_person_fails(self):
-        self._write(self._good_body().replace("本文。", "あなたは今日こう言った。"))
+        self._write(self._good_body().replace("明日は、", "あなたは今日こう言った。"))
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertFalse(res["ok"])
         self.assertIn("second_person", res["errors"])
@@ -457,7 +484,8 @@ class ValidateTests(unittest.TestCase):
         # エージェントが二人称で呼んでいるわけではないため、error にしない。
         self._write(
             self._good_body().replace(
-                "本文。", "ユーザーは「あなたは直して」と言っていた。\"あなたの番です\" とも。"
+                "明日は、",
+                'ユーザーは「あなたは直して」と言っていた。"あなたの番です" とも。明日は、',
             )
         )
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
@@ -465,7 +493,7 @@ class ValidateTests(unittest.TestCase):
 
     def test_unclosed_quote_does_not_hide_second_person(self):
         # 閉じていない引用を除去すると検査を抜けられる。閉じた引用だけを対象にする。
-        self._write(self._good_body().replace("本文。", "ユーザーは「あなたは直して と言っていた。"))
+        self._write(self._good_body().replace("明日は、", "ユーザーは「あなたは直して と言っていた。明日は、"))
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertIn("second_person", res["errors"])
 
@@ -478,7 +506,7 @@ class ValidateTests(unittest.TestCase):
         self.assertLess(res["chars"], core.MIN_CHARS_SOFT)
 
     def test_prose_chars_exclude_frontmatter_and_headings(self):
-        long = "\n\n".join(f"{s}\n" + "あ" * 150 for s in core.SECTIONS)
+        long = "\n\n".join("あ" * 150 for _ in range(6))
         body = (
             f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\ncommit: none\n---\n\n"
             f"# {DAY}\n\n{long}\n"
@@ -487,7 +515,7 @@ class ValidateTests(unittest.TestCase):
         res = core.validate_diary(DAY, home=self.home, repos=[self.repo])
         self.assertTrue(res["ok"], res)
         self.assertNotIn("too_short", [i["code"] for i in res["issues"]])
-        self.assertEqual(res["chars"], 150 * len(core.SECTIONS))
+        self.assertEqual(res["chars"], 900)
 
     def test_hash_without_commit_context_is_ignored(self):
         # 文脈の無いバッククォート付き16進は、ホスト名やIDの可能性が高いので検査しない
@@ -646,7 +674,7 @@ class RepoDiscoveryTests(unittest.TestCase):
         diary.write_text(
             f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
             f"commit: {sha}\n---\n\n# {DAY}\n\n"
-            + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+            + PROSE
             + "\n",
             encoding="utf-8",
         )
@@ -713,7 +741,7 @@ class RepoDiscoveryTests(unittest.TestCase):
             diary.write_text(
                 f"---\ndate: {DAY}\nauthor: '@tester'\nsessions: 1\nmessages: 1\n"
                 f"commit: {sha}\n---\n\n# {DAY}\n\n"
-                + "\n\n".join(f"{s}\n本文。" for s in core.SECTIONS)
+                + PROSE
                 + "\n",
                 encoding="utf-8",
             )
@@ -785,21 +813,22 @@ class IndexAndRegistrationTests(unittest.TestCase):
             self.assertLess(index.index(f"[{DAY}-10]"), index.index(f"[{DAY}-2]"))
 
     def test_index_reads_frontmatter_not_body(self):
-        # frontmatter に無い項目を本文から拾うと目次が嘘になる。frontmatter だけを読む
+        # frontmatter に無い項目を本文から拾うと目次が嘘になる。件数は frontmatter だけを読む
         with tempfile.TemporaryDirectory() as tmp:
             home = make_profile(Path(tmp))
             diary = home / "dreams" / f"{DAY}.md"
             diary.parent.mkdir(parents=True, exist_ok=True)
             diary.write_text(
                 f"---\ndate: {DAY}\nauthor: \"@t\"\nsessions: 2\ncommit: none\n---\n\n"
-                f"# {DAY}\n\n## 考えたこと\nmessages: 999\n",
+                f"# {DAY}\n\n本文の抜粋マーカー。\n",
                 encoding="utf-8",
             )
             res = core.build_index(home=home)
             index = Path(res["path"]).read_text(encoding="utf-8")
             self.assertIn("セッション 2", index)
-            self.assertNotIn("メッセージ 999", index)
-            self.assertNotIn("999", index)
+            # frontmatter に messages が無いので、件数は目次に載らない（本文に書いても拾わない）
+            self.assertNotIn("メッセージ", index)
+            self.assertIn("本文の抜粋マーカー", index)
 
     def test_index_tool_refuses_root_home(self):
         # cron worker で home が root に解決されたとき、別ディレクトリへ INDEX を書かない
