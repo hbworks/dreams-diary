@@ -72,6 +72,10 @@ class RenderTests(unittest.TestCase):
         """素材に `## 成功した操作` があることを書き手へ伝える（terminal の仕事の受け皿）。"""
         self.assertIn("成功した操作", core.render_cron_prompt())
 
+    def test_prompt_names_the_person_section(self):
+        """素材に `## この人のこと` があることを伝える（人物像はそこから組み立てる）。"""
+        self.assertIn("この人のこと", core.render_cron_prompt())
+
     def test_prompt_scopes_the_commit_section_to_patch_and_write_file(self):
         """コミット節の範囲を patch / write_file と明示し、terminal 編集を数えないと書く。"""
         text = core.render_cron_prompt()
