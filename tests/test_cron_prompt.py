@@ -78,6 +78,24 @@ class RenderTests(unittest.TestCase):
         self.assertIn("patch / write_file", text)
         self.assertIn("terminal 経由の編集", text)
 
+    def test_prompt_scopes_the_emotion_ban_to_the_user(self):
+        """心情の断定禁止はユーザーに係る。書き手自身の反応は書いてよい（抑止しない）。"""
+        text = core.render_cron_prompt()
+        self.assertIn("ユーザーの心情・意図は断定しない", text)
+        self.assertIn("自分の感情は書いてよい", text)
+
+    def test_prompt_allows_the_writers_own_judgment(self):
+        """根拠が薄い判断も、自分が決めたことなら第2節に書ける（素材の範囲に閉じ込めない）。"""
+        text = core.render_cron_prompt()
+        self.assertIn("判断は自分のものとして書く", text)
+        self.assertIn("薄さごと第2節に書いてよい", text)
+
+    def test_readme_section_list_matches_the_two_sentence_rule(self):
+        """README の節一覧が「一行」と言い、テンプレートが「2文以上」と言う食い違いを防ぐ。"""
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("明日の自分へ — one line", readme)
+        self.assertIn("two sentences or more", readme)
+
     def test_missing_token_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             broken = Path(tmp) / "prompt.md"

@@ -266,7 +266,7 @@ inflate the version. `plugin.yaml` is the source of truth and `git tag v<version
 3. 間違えたこと — with the real cause
 4. 勘違いしているかもしれないこと — guesses quarantined here
 5. 借りているもの — unfinished work
-6. 明日の自分へ — one line
+6. 明日の自分へ — two sentences or more, carrying the orders tomorrow needs
 
 ## Validator rules
 
