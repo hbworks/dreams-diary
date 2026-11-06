@@ -69,34 +69,28 @@ class CommitHookTests(unittest.TestCase):
             return []
         return [line.split("\t") for line in path.read_text(encoding="utf-8").splitlines()]
 
-    def test_hermes_commit_is_logged_with_profile_and_source(self) -> None:
+    def test_hermes_commit_is_logged_with_profile(self) -> None:
         env = _env({"HERMES_HOME": str(self.home), "HERMES_SESSION_PROFILE": "research"})
         sha = self._commit("a.txt", env)
         rows = self._log()
         self.assertEqual(len(rows), 1, rows)
-        when, repo, logged_sha, profile, source = rows[0]
+        when, repo, logged_sha, profile = rows[0]
         self.assertEqual(repo, "my-repo")
         self.assertEqual(logged_sha, sha)
         self.assertEqual(profile, "research")
-        self.assertEqual(source, "hermes")
         self.assertRegex(when, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+\d{2}:\d{2}$")
 
     def test_profile_falls_back_to_home_name_without_session_var(self) -> None:
         env = _env({"HERMES_HOME": str(self.home)}, drop=("HERMES_SESSION_PROFILE",))
         self._commit("b.txt", env)
-        _, _, _, profile, source = self._log()[0]
-        self.assertEqual((profile, source), ("research", "hermes"))
+        self.assertEqual(self._log()[0][3], "research")
 
-    def test_plain_commit_is_logged_as_external(self) -> None:
+    def test_plain_commit_writes_nothing(self) -> None:
         env = _env(drop=("HERMES_HOME", "HERMES_SESSION_PROFILE"))
         env["HOME"] = str(self.root / "home")
-        sha = self._commit("c.txt", env)
-        rows = (self.root / "home" / ".hermes" / "logs" / "git-commits.tsv").read_text(
-            encoding="utf-8"
-        ).splitlines()
-        cols = rows[0].split("\t")
-        self.assertEqual(cols[2], sha)
-        self.assertEqual(cols[3:], ["unset", "external"])
+        self._commit("c.txt", env)
+        self.assertFalse((self.root / "home" / ".hermes").exists())
+        self.assertFalse((self.home / "logs" / "git-commits.tsv").exists())
 
     def test_log_failure_never_blocks_commit(self) -> None:
         blocker = self.root / "not-a-dir"
