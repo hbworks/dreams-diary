@@ -215,17 +215,21 @@ The pack is `## 前回の日記の検証` → `## 前日の自己申告（未検
   `（失敗は記録されていない）`; an absent or unreadable `state.db` is reported as unavailable.
   A failure is not a mistake: grep misses and intended red TDD runs land here, which is why the
   heading says the cause is unconfirmed.
-- **コミット** only shows commits whose changed files overlap files this profile successfully
-  `patch`ed or `write_file`d that day. Reads (`read_file`, `search_files`) and failed edits do not
-  count. Matching is absolute-path based after `Path.resolve()`. The section ends with
+- **コミット** counts a commit as this profile's own work when either holds (OR, SPEC v1.7):
+  **log** — the day's commit log (`logs/git-commits/<date>.tsv`, written by the post-commit hook for
+  commits made under this profile) has its sha on a row with this profile's name; or **edit** — it
+  touches a file this profile successfully `patch`ed or `write_file`d that day. Each row is tagged
+  `[log]`, `[edit]`, or `[log+edit]`. Reads and failed edits do not count. Matching is absolute-path
+  based after `Path.resolve()`. The section ends with
   `ほかのコミット: N 件（patch / write_file で編集したファイルと重ならない）`, capped at 20 commits
-  per repo with `（ほか N 件）`. Zero edits prints
+  per repo with `（ほか N 件）`. If the day's log is missing or unreadable, the section says so and
+  only the edit rule applies. Zero edits prints
   `（patch / write_file で編集したファイルはない…）` — the scope is named in the line itself, because
   a terminal-only day is not a day without edits. A DB without the tool-call columns falls back to
-  every repo plus `（編集を特定できないため全リポジトリ）`. Known limits:
-  edits made through `terminal` (`sed`, heredocs, `git mv`) are invisible here — they appear in
-  `## 成功した操作` instead — a file touched by two profiles the same day appears as "mine" in both
-  packs, and a commit made on a later day never appears in the edit day's pack.
+  every repo plus `（編集を特定できないため全リポジトリ）`. Known limits: only repositories with the
+  hook installed can produce the log rule (currently `dreams-diary`); commits made with `--no-verify`,
+  before install, or outside Hermes are not in the log; a file touched by two profiles the same day
+  appears as "mine" in both packs; a commit made on a later day never appears in the edit day's pack.
   **A missing commit is not a missing day's work.**
   The validator checks the configured/discovered repository set; only the material's commit list is
   scoped to edits.
@@ -475,9 +479,11 @@ profile-local bridge の自動選択は
 会話には時刻付きのユーザー発言、`自分の発言` には assistant の本文抜粋（各セッション末尾600字、
 それ以前140字、最大8件）を含みます。`成功した操作` は整数 exit code が0で error のない terminal 呼び出しのうち、
 コマンド要約を復元できるものを最大15件記録します。失敗節も既知の失敗 payload のみを最大15件記録し、
-terminal の詳細は末尾の有意な行、他ツールは先頭の詳細を使います。コミット節はその日に成功した
-`patch` / `write_file` の変更ファイルと重なるコミットに絞ります。terminal 経由の変更、日をまたいだコミット、
-複数プロフィールが触った同一ファイルは正確に帰属できません。
+terminal の詳細は末尾の有意な行、他ツールは先頭の詳細を使います。コミット節は、その日の
+コミットログ（このプロフィールの Hermes 経由のコミット、`[log]`）か、その日に成功した
+`patch` / `write_file` の変更ファイルと重なるコミット（`[edit]`）のどちらかに当たるものだけを出します。
+ログが無い日は編集の重なりだけで判定し、その旨を書きます。フック未導入のリポジトリや `--no-verify` の
+コミットはログに無く、複数プロフィールが触った同一ファイルは正確に帰属できません。
 
 素材は保存・返却前に既知形式の秘密情報を `[REDACTED:<kind>]` に置換しますが、自由文や短い秘密を全て検出する
 保証はありません。日記の `possible_secret` は warn のみで、値を表示せず本文も書き換えません。
