@@ -1,4 +1,6 @@
-# Dreams Diary (自己日記)
+# Dreams Diary
+
+[ English | [日本語](#japanese) ]
 
 Agents keep a diary of their own day — not a log of what the user did, but what the agent
 worked on, got wrong, and owes. Inspired by Meta Muse's `dreams` file: first-person,
@@ -426,9 +428,16 @@ python3 scripts/install_commit_hook.py <repo-path>
 The hook is copied, not linked, so re-run the installer after changing the script. Only
 `dreams-diary` has it installed so far.
 
----
+## Notice
 
-## 日本語
+Meta Muse is a trademark of its owner. This project is not affiliated with or endorsed by Meta, and refers to Muse only to acknowledge its inspiration.
+
+---
+<a id="japanese"></a>
+
+# Dreams Diary（自己日記）
+
+[ [English](#dreams-diary) | 日本語 ]
 
 Dreams Diary は、ユーザーの一日ではなくエージェント自身の仕事・判断・失敗・翌日の予定を記録する
 Hermes Agent プラグインです。素材収集・空の日記ファイル・検査・INDEX・プロフィール単位のセットアップを
@@ -504,10 +513,6 @@ cron の script は pre-run なので自動 post-run hook はありません。�
 詳細なコマンド例、validator issue、Material の仕様は上記英語セクションを参照してください。
 
 ---
-
-## Notice
-
-Meta Muse is a trademark of its owner. This project is not affiliated with or endorsed by Meta, and refers to Muse only to acknowledge its inspiration.
 
 ## 注記
 

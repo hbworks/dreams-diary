@@ -97,6 +97,9 @@ class RenderTests(unittest.TestCase):
     def test_readme_describes_the_prose_starter_and_body(self):
         """README が開始ファイルと本文を現行の散文形式で説明する。"""
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("[ English | [日本語](#japanese) ]", readme)
+        self.assertIn("[ [English](#dreams-diary) | 日本語 ]", readme)
+        self.assertIn('<a id="japanese"></a>', readme)
         self.assertIn("## The diary body", readme)
         self.assertIn("The starter contains a `# YYYY-MM-DD` title", readme)
         self.assertIn("the diary body below it uses prose without section", readme)
