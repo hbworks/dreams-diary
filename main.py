@@ -4,7 +4,7 @@
 方針: プラグインは素材と検査だけを担う。文章はエージェント本人が書く。
 
 データはプロファイルごとに独立:
-    <profile_home>/dreams/YYYY-MM-DD.md       日記（見出しの無い散文。docs/SPEC-v2.0.md）
+    <profile_home>/dreams/YYYY-MM-DD.md       日記（日付タイトル＋見出しの無い散文。docs/SPEC-v2.0.md）
     <profile_home>/dreams/_material/<date>.md 素材
     <profile_home>/dreams/INDEX.md            目次
     <profile_home>/dreams/persona.md          任意。そのエージェントの声の指示
@@ -1380,7 +1380,7 @@ def write_skeleton(
     sessions: Optional[int] = None,
     messages: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """節構成だけ入った空の日記を用意する。本文はエージェントが書く。
+    """必須 frontmatter と日付タイトルだけの空の日記を用意する。本文はエージェントが書く。
 
     sessions / messages は素材で観測した実測値を渡す。省略時は空欄のまま残し、
     エージェントが素材から転記する（推測で 0 を埋めない）。
@@ -1435,7 +1435,7 @@ def write_skeleton(
             except OSError:
                 backup_path = None
     author = author or _author_name(home)
-    text = (
+    skeleton = (
         "---\n"
         f'date: {day}\n'
         f'author: "@{author}"\n'
@@ -1445,7 +1445,7 @@ def write_skeleton(
         "---\n\n"
         f"# {day}\n"
     )
-    path.write_text(text, encoding="utf-8")
+    path.write_text(skeleton, encoding="utf-8")
     persona = ddir / "persona.md"
     return {
         "ok": True,
@@ -1456,7 +1456,7 @@ def write_skeleton(
         "user_name": _user_name(home) or None,
         "user_name_source": _user_name_source(home)[1] or None,
         "counts_filled": bool(sessions_text or messages_text),
-        "message": "frontmatter だけ置いた。素材を読み、見出しを立てずに散文で本文を書くこと。",
+        "message": "frontmatter と日付タイトルだけ置いた。素材を読み、見出しを立てずに散文で本文を書くこと。",
     }
 
 
@@ -1898,7 +1898,7 @@ def build_index(home: Optional[Path] = None) -> Dict[str, Any]:
         return {"ok": False, "count": 0, "path": str(ddir / "INDEX.md")}
 
     def tail(text: str) -> str:
-        """目次の抜粋。散文では最終段落、旧6節では「明日の自分へ」の中身。"""
+        """目次の抜粋。散文では最終段落、旧形式では最後の節の本文。"""
         return " ".join(_last_paragraph(text).split())
 
     rows = []

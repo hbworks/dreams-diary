@@ -2,7 +2,7 @@
 """dreams-diary CLI — cron の `script` と手元の確認のための入口。
 
     python3 cli.py [--profile NAME] material [YYYY-MM-DD]   # 素材を stdout に出す
-    python3 cli.py [--profile NAME] write    [YYYY-MM-DD]   # 節見出しだけの日記を作る
+    python3 cli.py [--profile NAME] write    [YYYY-MM-DD]   # 本文空・日付タイトル付きの開始ファイルを作る
     python3 cli.py [--profile NAME] validate [YYYY-MM-DD]   # 検査（JSON）
     python3 cli.py [--profile NAME] validate --path FILE    # ファイル指定で検査
     python3 cli.py [--profile NAME] audit   [--days N]      # 直近 N 本をまとめて検査
@@ -14,10 +14,11 @@
     python3 cli.py sync --check                             # 全プロファイルのスクリプト・プロンプト点検
     python3 cli.py sync --all                               # 全プロファイルのスクリプト・プロンプト一括同期
 
-プロファイルを特定できない文脈（HERMES_HOME もコンテキストローカル home も無い）では
-~/.hermes/active_profile — つまり「最後に触ったプロファイル」— に落ちる。別プロファイルの
-日記を黙って読んだり書いたりしないよう、その場合は警告を出して続行する。
-`prompt` はプロファイル非依存なので、この解決も警告も行わない。
+データ系コマンドの home 解決順は Hermes の context-local home → HERMES_HOME →
+HERMES_PROFILE → Hermes root の active_profile → Hermes root。active_profile / root に
+フォールバックした場合や profile ではない home の場合は、選んだ home を警告して続行する。
+Hermes root は DREAMS_HERMES_ROOT で明示できる。`prompt` はプロファイル非依存、
+`install` / `sync` は明示した profile target を使う。
 """
 
 from __future__ import annotations

@@ -94,10 +94,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn("判断は自分のものとして書く", text)
         self.assertIn("薄さごと書いてよい", text)
 
-    def test_readme_describes_the_prose_body(self):
-        """README が6節を要求したまま（散文の本文と食い違って）残らないようにする。"""
+    def test_readme_describes_the_prose_starter_and_body(self):
+        """README が開始ファイルと本文を現行の散文形式で説明する。"""
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("## The diary body", readme)
+        self.assertIn("The starter contains a `# YYYY-MM-DD` title", readme)
+        self.assertIn("the diary body below it uses prose without section", readme)
         self.assertNotIn("missing_section", readme)
         self.assertNotIn("明日の自分へ — one line", readme)
 

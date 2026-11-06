@@ -22,8 +22,9 @@ TOOLSET = "dreams_diary"
 _MATERIAL_SCHEMA = {
     "name": "dreams_material",
     "description": (
-        "その日の日記素材（会話・使用ツール・git コミット・memory 追加分）を Markdown で返す。"
-        "プロファイルごとの state.db / memory.db と ~/Dev/git 配下のコミットを読む。"
+        "その日の日記素材（会話・使用ツール・patch / write_file の編集と重なる git コミット・memory 追加分）を Markdown で返す。"
+        "プロファイルごとの state.db / memory.db と ~/Dev/git 配下のコミットを読み、探索範囲が不明な場合は注記する。"
+        "DREAMS_REPO_DEPTH で深さ、DREAMS_REPOS でリポジトリ path を指定できる。"
         "同じ内容は <profile>/dreams/_material/<date>.md にも保存される。"
     ),
     "parameters": {
@@ -42,8 +43,8 @@ _MATERIAL_SCHEMA = {
 _WRITE_SCHEMA = {
     "name": "dreams_write",
     "description": (
-        "その日の日記ファイルを、frontmatter と6つの節見出しだけの状態で用意する。"
-        "本文は書かない。エージェントが dreams_material を読んで自分の声で各節を埋める。"
+        "その日の日記ファイルを、必須 frontmatter と日付タイトル（# YYYY-MM-DD）だけの状態で用意する。"
+        "本文は空。エージェントが dreams_material を読み、見出しのない散文で本文を書く。"
         "sessions / messages には素材で観測した実測値を渡せる（省略時は空欄のまま残る。"
         "推測で 0 を入れない）。"
     ),
@@ -70,9 +71,9 @@ _WRITE_SCHEMA = {
 _VALIDATE_SCHEMA = {
     "name": "dreams_validate",
     "description": (
-        "書いた日記を機械検査する。6節の有無、「あなた」の混入、字数、"
-        "そしてコミットハッシュが ~/Dev/git 配下のどれかのリポジトリに実在するかを確認し、"
-        "捏造の疑いを error として返す。"
+        "書いた日記の frontmatter、テキスト内の「あなた」（閉じた引用符内を除く）、字数、"
+        "時刻、既知形式の秘密情報、コミット文脈のハッシュを検査する。見出しの有無は検査しない。"
+        "字数・時刻・秘密情報・探索先が空のハッシュ・ローカル検証できない外部ハッシュは warn。"
     ),
     "parameters": {
         "type": "object",

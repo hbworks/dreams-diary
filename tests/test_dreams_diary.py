@@ -314,6 +314,7 @@ class SkeletonTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         text = Path(res["path"]).read_text(encoding="utf-8")
         self.assertIn(f"date: {DAY}", text)
+        self.assertIn(f"# {DAY}\n", text)
         self.assertNotIn("## ", text)
         self.assertEqual(len(res["flow"]), len(core.FLOW))
 
@@ -858,6 +859,14 @@ class IndexAndRegistrationTests(unittest.TestCase):
             names, ["dreams_material", "dreams_write", "dreams_validate", "dreams_index"]
         )
         self.assertTrue(all(c[1] == "dreams_diary" for c in ctx.calls))
+        schemas = {name: schema for name, _, schema, _ in ctx.calls}
+        self.assertIn("patch / write_file", schemas["dreams_material"]["description"])
+        self.assertIn("探索範囲が不明", schemas["dreams_material"]["description"])
+        self.assertIn("# YYYY-MM-DD", schemas["dreams_write"]["description"])
+        self.assertIn("見出しのない散文", schemas["dreams_write"]["description"])
+        self.assertNotIn("6つの節見出し", schemas["dreams_write"]["description"])
+        self.assertIn("見出しの有無は検査しない", schemas["dreams_validate"]["description"])
+        self.assertNotIn("6節の有無", schemas["dreams_validate"]["description"])
         # ハンドラは例外を握って JSON を返す
         with patch.object(plugin.logger, "warning"):
             out = ctx.calls[0][3]({"date": "not-a-date"})
