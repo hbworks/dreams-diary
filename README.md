@@ -502,3 +502,13 @@ cron の script は pre-run なので自動 post-run hook はありません。�
 `build_handoff()`、週次の memory ルール昇華を実装していません。
 
 詳細なコマンド例、validator issue、Material の仕様は上記英語セクションを参照してください。
+
+---
+
+## Notice
+
+Meta Muse is a trademark of its owner. This project is not affiliated with or endorsed by Meta, and refers to Muse only to acknowledge its inspiration.
+
+## 注記
+
+Meta Muse は各権利者の商標です。本プロジェクトは Meta と提携・承認されたものではなく、着想の出典としてのみ言及しています。
