@@ -1064,12 +1064,73 @@ def _commit_is_mine(repo: Path, commit: Dict[str, Any], edited: set) -> bool:
     return False
 
 
-def _commits_material(
-    day: str, repos: Optional[List[Path]] = None, edited: Optional[set] = None
-) -> str:
-    """自分の仕事（編集したファイルと重なるコミット）だけを出す。
+COMMIT_LOG_DIR = "logs/git-commits"
+COMMIT_LOG_KEEP_DAYS = 30
 
+
+def _commit_log_path(home: Path, day: str) -> Path:
+    return home / COMMIT_LOG_DIR / f"{day}.tsv"
+
+
+def _log_commit_shas(home: Path, day: str) -> Optional[set]:
+    """当日のコミットログ（Hermes 経由のコミット）のうち、自分の行の sha 集合。
+
+    None は「ログが無い・読めない」。空集合は「ログはあるが自分の行は無い」。
+    日付別ファイルなので、読むのは当日の行だけ。
+    """
+    path = _commit_log_path(home, day)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    me = _author_name(home)
+    shas: set = set()
+    for line in text.splitlines():
+        cols = line.split("\t")
+        if len(cols) != 4:
+            continue
+        _when, _repo, sha, profile = cols
+        if profile == me and re.fullmatch(r"[0-9a-f]{7,40}", sha):
+            shas.add(sha)
+    return shas
+
+
+def _prune_commit_logs(home: Path, day: str) -> None:
+    """保持期間（COMMIT_LOG_KEEP_DAYS）より古い日付別ファイルを削除する。
+
+    ファイル名が日付でないものには触らない。削除は素材生成時だけ行う。
+    """
+    ddir = home / COMMIT_LOG_DIR
+    if not ddir.is_dir():
+        return
+    try:
+        today = datetime.date.fromisoformat(day)
+    except ValueError:
+        return
+    for f in ddir.glob("*.tsv"):
+        try:
+            file_day = datetime.date.fromisoformat(f.stem)
+        except ValueError:
+            continue
+        if (today - file_day).days > COMMIT_LOG_KEEP_DAYS:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+
+def _commits_material(
+    day: str,
+    repos: Optional[List[Path]] = None,
+    edited: Optional[set] = None,
+    log_shas: Optional[set] = None,
+) -> str:
+    """自分の仕事だけを出す。根拠は2つ（OR）。
+
+    (a) log: 当日のコミットログに、自分のプロファイル名の行として sha がある
+    (b) edit: 変更ファイルが自分の patch / write_file の編集と重なる
     edited が None のときは編集を特定できないので、従来どおり全リポジトリを出して注記する。
+    log_shas が None のときはログが無い・読めないので (b) だけで判定し、その旨を書く。
     """
     repos = repos if repos is not None else discover_repos()
     if not repos:
@@ -1080,14 +1141,28 @@ def _commits_material(
         commits = _git_commits(repo, day)
         if edited is None:
             mine = commits
+            tags = {}
         else:
-            mine = [c for c in commits if _commit_is_mine(repo, c, edited)]
-            others += len(commits) - len(mine)
+            tags = {}
+            mine = []
+            for c in commits:
+                by_log = log_shas is not None and any(
+                    c["hash"].startswith(s) or s.startswith(c["hash"]) for s in log_shas
+                )
+                by_edit = _commit_is_mine(repo, c, edited)
+                if not (by_log or by_edit):
+                    others += 1
+                    continue
+                tags[c["hash"]] = (
+                    "log+edit" if by_log and by_edit else ("log" if by_log else "edit")
+                )
+                mine.append(c)
         if not mine:
             continue
         lines = [f"[{repo.name}]"]
         for commit in mine[:COMMIT_MAX_PER_REPO]:
-            lines.append(f"{commit['hash']} {commit['time']} {commit['subject']}")
+            tag = f" [{tags[commit['hash']]}]" if tags else ""
+            lines.append(f"{commit['hash']} {commit['time']} {commit['subject']}{tag}")
             lines.extend(f"  {name}" for name in commit["files"])
         if len(mine) > COMMIT_MAX_PER_REPO:
             lines.append(f"（ほか {len(mine) - COMMIT_MAX_PER_REPO} 件）")
@@ -1108,6 +1183,8 @@ def _commits_material(
     out.extend(blocks)
     if edited is None:
         out.append("（編集を特定できないため全リポジトリ）")
+    if edited is not None and log_shas is None:
+        out.append("（コミットログが無い・読めないため、編集ファイルとの重なりだけで判定した）")
     out.append(
         f"ほかのコミット: {others} 件（patch / write_file で編集したファイルと重ならない）"
     )
@@ -1197,7 +1274,9 @@ def collect_material(
     successes = _successful_operations_material(day, home)
     failures = _failures_material(day, home)
     edited = _edited_files(day, home)
-    commits = _commits_material(day, repos, edited)
+    log_shas = _log_commit_shas(home, day)
+    _prune_commit_logs(home, day)
+    commits = _commits_material(day, repos, edited, log_shas)
     memory = _memory_material(day, home)
     self_head = "## 前日の自己申告（未検証）\n"
     person_head = "\n## この人のこと（直近14日の機械抽出）\n"

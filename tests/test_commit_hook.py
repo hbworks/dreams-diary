@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
 import subprocess
@@ -63,8 +64,12 @@ class CommitHookTests(unittest.TestCase):
             env=env,
         ).stdout.strip()
 
+    def _log_path(self, day: str | None = None) -> Path:
+        day = day or datetime.date.today().isoformat()
+        return self.home / "logs" / "git-commits" / f"{day}.tsv"
+
     def _log(self) -> list[list[str]]:
-        path = self.home / "logs" / "git-commits.tsv"
+        path = self._log_path()
         if not path.exists():
             return []
         return [line.split("\t") for line in path.read_text(encoding="utf-8").splitlines()]
@@ -85,12 +90,19 @@ class CommitHookTests(unittest.TestCase):
         self._commit("b.txt", env)
         self.assertEqual(self._log()[0][3], "research")
 
+    def test_rows_go_to_a_per_day_file(self) -> None:
+        env = _env({"HERMES_HOME": str(self.home), "HERMES_SESSION_PROFILE": "research"})
+        self._commit("e.txt", env)
+        day_files = list((self.home / "logs" / "git-commits").glob("*.tsv"))
+        self.assertEqual([p.name for p in day_files], [f"{datetime.date.today().isoformat()}.tsv"])
+        self.assertFalse((self.home / "logs" / "git-commits.tsv").exists())
+
     def test_plain_commit_writes_nothing(self) -> None:
         env = _env(drop=("HERMES_HOME", "HERMES_SESSION_PROFILE"))
         env["HOME"] = str(self.root / "home")
         self._commit("c.txt", env)
         self.assertFalse((self.root / "home" / ".hermes").exists())
-        self.assertFalse((self.home / "logs" / "git-commits.tsv").exists())
+        self.assertFalse((self.home / "logs" / "git-commits").exists())
 
     def test_log_failure_never_blocks_commit(self) -> None:
         blocker = self.root / "not-a-dir"
