@@ -389,6 +389,30 @@ python3 -m unittest discover -s tests
 The standard-library tests build throwaway profiles (`state.db`, `memory.db`) and a throwaway
 git repo, so nothing touches real data. Tests are isolated from the live cron/profile tree.
 
+## Commit log hook (per repository)
+
+`scripts/git_commit_log_hook.sh` is a git `post-commit` hook. After each commit made under a
+Hermes profile (`HERMES_HOME` set), it appends one line to `$HERMES_HOME/logs/git-commits.tsv`:
+
+```
+<ISO8601 time>	<repo name>	<sha>	<profile>
+```
+
+Commits made without `HERMES_HOME` write nothing. The diary material treats a commit as this
+profile's only when its sha appears in that profile's log. Absence means "not recorded", not
+"not mine", so a commit made with `--no-verify` or before the hook was installed is not listed.
+
+Install into a repository (idempotent; refuses to overwrite a different `post-commit` or when
+`core.hooksPath` is set):
+
+```sh
+python3 scripts/install_commit_hook.py <repo-path>
+```
+
+The hook is copied, not linked, so re-run the installer after changing the script. Only
+`dreams-diary` has it installed so far. The hook is not part of the plugin's runtime and does
+not affect `dreams_material` yet.
+
 ---
 
 ## 日本語
