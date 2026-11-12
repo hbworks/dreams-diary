@@ -103,7 +103,7 @@ FAIL_DETAIL_CHARS = 120
 SELF_REPORT_MAX_CHARS = 600
 COMMIT_MAX_PER_REPO = 20
 # 素材ヘッダの件数は redact_secrets の後に埋める（マスクの出口を1か所に保つ）。
-MASK_COUNT_TOKEN = "__DREAMS_MASK_COUNT__"
+MASK_COUNT_MARKER = "__DREAMS_MASK_COUNT__"
 
 # 日記ファイル名の唯一の定義。検査・遅延ゲート・監査・目次がそれぞれ別の正規表現を持つと、
 # `-2` を拾う/拾わないが場所ごとに変わり、片方だけが静かに漏れる。
@@ -1262,7 +1262,7 @@ def collect_material(
     header = (
         f"# 夢日記の素材 — {day}\n\n"
         f"生成: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')} / プロファイル: {home.name}\n"
-        f"マスク: {MASK_COUNT_TOKEN} 件\n"
+        f"マスク: {MASK_COUNT_MARKER} 件\n"
         f"日記ファイル: {diary} （{'あり（上書き禁止）' if diary.exists() else 'なし'}）\n\n"
         # post-run ゲートの代わり: 前回の日記を検査し、未通過なら先頭で知らせる。
         f"## 前回の日記の検証\n{_gate_material(day, home, repos)}\n"
@@ -1307,9 +1307,9 @@ def collect_material(
     # 保存と返却の出口を1か所にする。ここを通した本文だけをファイルにも返り値にも使う。
     body_full, mask_counts = redact_secrets(body_full)
     mask_line = str(sum(mask_counts.values()))
-    body_full = body_full.replace(MASK_COUNT_TOKEN, mask_line)
+    body_full = body_full.replace(MASK_COUNT_MARKER, mask_line)
     # 切り詰め経路は header から組み直すので、header 側も同じ値にしておく。
-    header = header.replace(MASK_COUNT_TOKEN, mask_line)
+    header = header.replace(MASK_COUNT_MARKER, mask_line)
 
     # 全文は必ず _material 側へ保存する。ここを切り詰めると「全文はそちらを見る」
     # という案内が嘘になり、根拠の再確認ができなくなる。

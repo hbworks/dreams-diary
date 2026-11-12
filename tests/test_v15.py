@@ -355,7 +355,7 @@ class RedactionTests(unittest.TestCase):
         with patch.object(core, "_sessions_material", return_value=secret_text):
             got = core.collect_material(DAY, home=home, max_chars=800, repos=[])
         self.assertTrue(got["truncated"])
-        self.assertNotIn(core.MASK_COUNT_TOKEN, got["material"])
+        self.assertNotIn(core.MASK_COUNT_MARKER, got["material"])
         self.assertIn("マスク: 1 件", got["material"])
 
 
